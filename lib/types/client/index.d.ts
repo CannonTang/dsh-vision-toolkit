@@ -13,6 +13,9 @@ declare const en: {
     readonly credential: "Credential reference";
     readonly model: "Model";
     readonly language: "Output language";
+    readonly autoBridge: "Auto image bridge";
+    readonly autoBridgeEnabled: "Bridge images to the vision model automatically";
+    readonly autoBridgeMaxImages: "Max images per message";
     readonly limits: "Limits";
     readonly timeout: "Request timeout (ms)";
     readonly maxBytes: "Maximum image bytes";
@@ -102,6 +105,10 @@ interface SettingsValue {
         model?: string;
     };
     language?: 'zh' | 'en';
+    autoBridge?: {
+        enabled?: boolean;
+        maxImagesPerMessage?: number;
+    };
     timeoutMs?: number;
     maxImageBytes?: number;
     maxImagePixels?: number;

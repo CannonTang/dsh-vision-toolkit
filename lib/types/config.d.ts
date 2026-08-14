@@ -21,6 +21,13 @@ export interface VisionToolkitConfig {
     };
     /** Vision output language (`zh` or `en`). */
     language?: 'zh' | 'en';
+    /** Automatic image bridging: surface inline images to the vision model. */
+    autoBridge?: {
+        /** Whether image bridging is enabled at all. */
+        enabled?: boolean;
+        /** Maximum number of images bridged per single message. */
+        maxImagesPerMessage?: number;
+    };
     /** Single remote/upstream call budget in milliseconds. */
     timeoutMs?: number;
     /** Maximum accepted input image size in bytes. */
@@ -50,6 +57,10 @@ export interface ResolvedVisionToolkitConfig {
         model: string;
     };
     language: 'zh' | 'en';
+    autoBridge: {
+        enabled: boolean;
+        maxImagesPerMessage: number;
+    };
     timeoutMs: number;
     maxImageBytes: number;
     maxImagePixels: number;

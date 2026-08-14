@@ -27,6 +27,13 @@ export interface VisionToolkitConfig {
   }
   /** Vision output language (`zh` or `en`). */
   language?: 'zh' | 'en'
+  /** Automatic image bridging: surface inline images to the vision model. */
+  autoBridge?: {
+    /** Whether image bridging is enabled at all. */
+    enabled?: boolean
+    /** Maximum number of images bridged per single message. */
+    maxImagesPerMessage?: number
+  }
   /** Single remote/upstream call budget in milliseconds. */
   timeoutMs?: number
   /** Maximum accepted input image size in bytes. */
@@ -55,6 +62,10 @@ export const Config: Schema<VisionToolkitConfig> = z.object({
     model: z.string().default('gemini-3.6-flash'),
   }),
   language: z.union(['zh', 'en'] as const).default('zh'),
+  autoBridge: z.object({
+    enabled: z.boolean().default(true),
+    maxImagesPerMessage: z.number().min(1).max(8).default(4),
+  }).default({ enabled: true, maxImagesPerMessage: 4 }),
   timeoutMs: z.number().default(60000),
   maxImageBytes: z.number().default(10485760),
   maxImagePixels: z.number().default(40000000),
@@ -75,6 +86,10 @@ export interface ResolvedVisionToolkitConfig {
     model: string
   }
   language: 'zh' | 'en'
+  autoBridge: {
+    enabled: boolean
+    maxImagesPerMessage: number
+  }
   timeoutMs: number
   maxImageBytes: number
   maxImagePixels: number
@@ -159,10 +174,20 @@ export function resolveConfig(config: VisionToolkitConfig = {}): ResolvedVisionT
   if (python !== undefined && python.length === 0) {
     throw new VisionToolkitError('config', 'runtime.python must not be empty')
   }
+  const autoBridge = config.autoBridge ?? {}
+  const autoBridgeEnabled = autoBridge.enabled ?? true
+  const maxImagesPerMessage = autoBridge.maxImagesPerMessage ?? 4
+  if (typeof autoBridgeEnabled !== 'boolean') {
+    throw new VisionToolkitError('config', 'autoBridge.enabled must be a boolean')
+  }
+  if (!Number.isInteger(maxImagesPerMessage) || maxImagesPerMessage < 1 || maxImagesPerMessage > 8) {
+    throw new VisionToolkitError('config', 'autoBridge.maxImagesPerMessage must be an integer between 1 and 8')
+  }
   const allowedDirs = (config.allowedDirs ?? []).map(dir => dir.trim()).filter(dir => dir.length > 0)
   return {
     provider: { baseUrl, credential, model },
     language,
+    autoBridge: { enabled: autoBridgeEnabled, maxImagesPerMessage },
     timeoutMs,
     maxImageBytes,
     maxImagePixels,
