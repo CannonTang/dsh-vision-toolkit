@@ -24,6 +24,23 @@ describe('ImageAnalyzer', () => {
     expect(outcome.ok).toBe(false);
     expect(outcome.reason).toContain('rate limited');
   });
+  it('stages temp files under the workspace and forwards the real workspace to glance', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'dvt-ws-'));
+    const seen = [];
+    const analyzer = new ImageAnalyzer(fakeRuntime(async (request, options) => {
+      seen.push({ path: request.images[0], workspace: options.workspace });
+      return { images: [], mode: 'describe', answer: 'ok', truncated: false };
+    }), { workspace });
+    const outcome = await analyzer.analyze(new Uint8Array([1]), 'image/png', 'a.png');
+    expect(outcome).toEqual({ ok: true, answer: 'ok' });
+    // glance 收到真实 workspace,相对 allowedDirs 按它解析
+    expect(seen[0].workspace).toBe(workspace);
+    // 临时文件位于 workspace 下,且清理后不存在
+    expect(seen[0].path.startsWith(join(workspace, '.dvt-bridge-tmp'))).toBe(true);
+    const { access } = await import('node:fs/promises');
+    await expect(access(seen[0].path)).rejects.toThrow();
+    await rm(workspace, { recursive: true, force: true });
+  });
   it('cleans up its temp directory', async () => {
     const seen = [];
     const analyzer = new ImageAnalyzer(fakeRuntime(async (request) => {

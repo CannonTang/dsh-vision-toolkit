@@ -4,7 +4,7 @@
  * vision-provider call as the manual tools.
  * @module dsh-vision-toolkit/auto-bridge-analyze
  */
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, rmdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { VisionToolkitRuntime } from './runtime.ts'
@@ -27,10 +27,15 @@ export type AnalyzeOutcome = { ok: true; answer: string } | { ok: false; reason:
 export class ImageAnalyzer {
   #runtimeSource: () => VisionToolkitRuntime
   #language: 'zh' | 'en'
+  #workspace: string | undefined
 
-  constructor(runtimeSource: () => VisionToolkitRuntime, options: { language?: 'zh' | 'en' } = {}) {
+  constructor(
+    runtimeSource: () => VisionToolkitRuntime,
+    options: { language?: 'zh' | 'en'; workspace?: string } = {},
+  ) {
     this.#runtimeSource = runtimeSource
     this.#language = options.language ?? 'zh'
+    this.#workspace = options.workspace
   }
 
   /** Vision output language this analyzer was configured with. */
@@ -38,10 +43,20 @@ export class ImageAnalyzer {
     return this.#language
   }
 
+  /** Real session workspace temp files are staged in; glance runs against it. */
+  get workspace(): string | undefined {
+    return this.#workspace
+  }
+
   /**
    * Analyze attachment bytes as one image. Writes `bytes` to a fresh temp
    * file, reuses runtime glance with no query (plain description mode), and
    * removes the temp directory before returning.
+   *
+   * With a configured workspace the file is staged inside
+   * `<workspace>/.dvt-bridge-tmp/` and glance gets that real workspace, so
+   * relative allowedDirs entries resolve against it exactly like the manual
+   * tools. Without one the system temp dir is used and doubles as workspace.
    *
    * The `name` attachment hint is accepted for forward compatibility but not
    * passed to glance yet.
@@ -53,20 +68,27 @@ export class ImageAnalyzer {
     signal?: AbortSignal,
   ): Promise<AnalyzeOutcome> {
     void name
-    const dir = await mkdtemp(join(tmpdir(), 'dvt-bridge-'))
+    const base = this.#workspace !== undefined ? join(this.#workspace, '.dvt-bridge-tmp') : tmpdir()
+    if (this.#workspace !== undefined) await mkdir(base, { recursive: true })
+    const dir = await mkdtemp(join(base, 'dvt-bridge-'))
     const file = join(dir, `image${EXTENSIONS.get(mediaType) ?? '.png'}`)
     try {
       await writeFile(file, bytes)
       const runtime = this.#runtimeSource()
       const result = await runtime.glance({ images: [file] }, {
         signal: signal ?? new AbortController().signal,
-        workspace: dir,
+        workspace: this.#workspace ?? dir,
       })
       return { ok: true, answer: String(result.answer ?? '') }
     } catch (error) {
       return { ok: false, reason: error instanceof Error ? error.message : String(error) }
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => {})
+      if (this.#workspace !== undefined) {
+        // Remove the staging root too once it is empty (never recursively, so
+        // a concurrent analyze's in-flight temp dir is not touched).
+        await rmdir(base).catch(() => {})
+      }
     }
   }
 }
