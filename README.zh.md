@@ -85,18 +85,14 @@ DSH Vision Toolkit 在这些上游能力之外增加原生工具 schema、版本
 
 ## 快速开始
 
-前置条件：拥有此私有仓库的访问权限、DeepSeek Harness、Python 3.11+，并确保 `dsh plugin` 可以使用 `pnpm`。使用已认证的 GitHub 凭据克隆发布仓库，将其加入所需 Profile，并确认 Bundle 行已经挂载：
+**请先阅读 [INSTALL.zh.md](INSTALL.zh.md) 完整安装与排障说明**(Windows/macOS 全新安装、已装机器修复、已知坑)。推荐安装方式:
 
 ```sh
-git clone https://github.com/dsh-external/dsh-vision-toolkit.git
-PLUGIN="$PWD/dsh-vision-toolkit"
-dsh plugin --profile web add "$PLUGIN"
-dsh plugin --profile headless add "$PLUGIN"
-dsh --profile web --dump-config | grep vision-toolkit
-dsh --profile headless --dump-config | grep vision-toolkit
+dsh plugin --profile web add github:CannonTang/dsh-vision-toolkit#feature/auto-image-bridge
+npx @deepseek-ai/dsh web
 ```
 
-安装后重启正在运行的 Web Profile，打开 **设置 → 视觉工具**，为远程工具选择 DSH Credential，并显式执行**测试连接**。在会话中把图片放进工作区路径，调用 `/vision-tools`，再让 Agent 使用明确的 `vision_*` 工具。本地裁剪、SVG、像素、颜色、前景和 HTML 操作不需要视觉 API Credential。
+前置条件:DeepSeek Harness、Python 3.11+、可访问本 fork 的 GitHub 凭据。安装后重启 Web Profile,打开 **设置 → 视觉工具**,选择 DSH Credential 并执行**测试连接**。在会话中把图片放进工作区路径,调用 `/vision-tools`,再让 Agent 使用明确的 `vision_*` 工具;或开启自动桥接直接粘贴图片。本地裁剪、SVG、像素、颜色、前景和 HTML 操作不需要视觉 API Credential。
 
 ## 直接粘贴图片
 
