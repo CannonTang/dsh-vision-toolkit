@@ -98,6 +98,10 @@ dsh --profile headless --dump-config | grep vision-toolkit
 
 安装后重启正在运行的 Web Profile，打开 **设置 → 视觉工具**，为远程工具选择 DSH Credential，并显式执行**测试连接**。在会话中把图片放进工作区路径，调用 `/vision-tools`，再让 Agent 使用明确的 `vision_*` 工具。本地裁剪、SVG、像素、颜色、前景和 HTML 操作不需要视觉 API Credential。
 
+## 直接粘贴图片
+
+开启 **设置 → 视觉工具 → 图片自动桥接** 后，直接在对话输入框粘贴图片并发送即可：图片会先交给已配置的视觉 API 生成文字描述并注入会话，Agent 自动"看见"图片内容，不再出现「当前模型不支持图片」。需要深入分析时，仍可让 Agent 调用 `vision_glance` 等视觉工具（描述中附有图片的持久化路径，工具按路径读取同一张图）。图片分析失败时自动降级为提示文本，对话不受影响。
+
 ## 工作原理
 
 ```mermaid

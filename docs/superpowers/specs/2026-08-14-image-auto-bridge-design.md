@@ -116,3 +116,26 @@ Agent 需要深入时,仍可调用 10 个视觉工具(描述中附带图片引�
 - [x] 每张图分析与并发:串行逐图,受 `autoBridge.maxImagesPerMessage` 限制,超出部分附注说明
 - [x] **Task 1 spike 结论(surface replace)**:宿主真实 `dsh-session` 上 `user/message` 替换事件(`{op:'replace',start:0,end:0}`)确实遮蔽模型历史——替换后 `deriveMessages()` 只返回桥接纯文本版消息,原图片块不再进入模型历史
 - [x] **Task 1 spike 结论(模态补丁)**:cordis proxy 实例属性可直接赋值,`ctx.llm.resolveModelInfo = ...` 方式生效(`instance-patch=true`),无需原型链补丁;投影方法确切名为 `Session.deriveMessages()`(无参,返回 `Message[]`)
+
+## 验收记录
+
+日期:2026-08-14(分支 `feature/auto-image-bridge`,Task 7)
+
+**自动化验证(Task 7 实测,通过)**
+
+1. `dsh web` 冷启动:URL 行 `dsh web: http://127.0.0.1:3080` 秒级打印;`curl http://127.0.0.1:3080/` 返回 200,页面与静态资源(manifest / favicon / 主 JS)全部 200。
+2. 插件树:boot manifest 含 `@dsh-external/dsh-vision-toolkit` 条目;其 client bundle(rev `222a15191a1b`)含 autoBridge 设置 UI(zh/en 文案、`autoBridge?.enabled ?? true` 默认值、`maxImagesPerMessage ?? 4`)。
+3. 启动日志(观察约 2 分钟):仅 URL 一行,无 plugin tree 错误、无 unhandled rejection、无 warn/error。
+4. 回归:auto-bridge 接线测试 6/6 通过(apply 生命周期、enabled 翻转对称、降级文案「处理失败」、maxImages 溢出说明、畸形 session 只 warn 不抛)。
+
+**浏览器交互验收(留给用户,粘贴图片的浏览器交互无法自动化)**
+
+| # | 检查项 | 结果 |
+|---|---|---|
+| 1 | 粘贴一张图片并发送 → 消息带图片预览正常发出,无「当前模型不支持图片」提示 | 待用户 |
+| 2 | Agent 的回复体现图片内容(描述注入生效) | 待用户 |
+| 3 | 追问「用视觉工具对这张图做深入分析」→ Agent 能调 `vision_glance` 等工具(替换文本中已附持久化路径,工具按路径读取同一张图) | 待用户 |
+| 4 | 设置 → 视觉工具 → 图片自动桥接 关闭 → 粘贴图片被拒绝(回到现状);重新开启 → 恢复 | 待用户 |
+| 5 | 停掉 dsh,检查终端无异常堆栈 | 待用户 |
+
+备注:验收前已重启 `dsh web`(原 10:24 启动的实例早于 Task 6 接线完成时间,代码陈旧);新实例由 Task 7 以 `nohup npx @deepseek-ai/dsh web` 启动,日志在 `.superpowers/sdd/2026-08-14-image-auto-bridge/acceptance-dsh-web.log`,监听 127.0.0.1:3080。浏览器步骤完成后请回来把上表结果更新为通过/失败。
