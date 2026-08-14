@@ -34,7 +34,7 @@ export const name = '@dsh-external/dsh-vision-toolkit'
 
 export { Config }
 
-export const inject = ['tools', 'credentials', 'skills', 'subprocess', 'settings', 'agents']
+export const inject = ['tools', 'credentials', 'skills', 'subprocess', 'settings', 'agents', 'llm', 'attachments', 'sessions']
 
 /** Plugin entry: validate configuration synchronously, then mount asynchronously. */
 export async function apply(ctx: Context, config: VisionToolkitConfig = {}): Promise<() => void> {
