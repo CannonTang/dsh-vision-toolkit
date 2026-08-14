@@ -55,6 +55,8 @@ function makeFakeCtx(
         if (i >= 0) listeners.splice(i, 1);
       };
     },
+    // 会话 store seam:桥接启动时枚举存量会话并包装其 append
+    sessions: { list: () => [] as unknown[] },
     settings: {
       register: () => ({
         get: () => value,
@@ -119,14 +121,15 @@ function fakeSession(cwd?: string) {
     events,
     header: cwd === undefined ? undefined : { cwd },
     append(type: string, data: unknown, intent: unknown) {
-      events.push({ type, data, intent });
-      return { seq: events.length - 1 };
+      const event = { type, data, intent, seq: events.length };
+      events.push(event);
+      return event;
     },
   };
 }
 
 describe('auto bridge apply wiring', () => {
-  it('wraps resolveModelInfo and registers the session listener on apply; dispose restores both', async () => {
+  it('wraps resolveModelInfo and registers the session lifecycle listeners on apply; dispose restores both', async () => {
     const h = makeFakeCtx();
     const pristine = h.llm.resolveModelInfo;
     const dispose = await apply(h.ctx as never, {});
@@ -136,8 +139,8 @@ describe('auto bridge apply wiring', () => {
       const info = await h.llm.resolveModelInfo('deepseek', 'chat');
       expect(info.inputModalities).toContain('image');
       expect(info.inputModalities).toContain('text');
-      // bridge 已在 ctx.on 上注册 session/event 监听
-      expect(h.listeners.map((l) => l.name)).toEqual(['session/event']);
+      // bridge 已在 ctx.on 上注册 session/created + session/disposed 监听
+      expect(h.listeners.map((l) => l.name)).toEqual(['session/created', 'session/disposed']);
       expect(h.watchers).toHaveLength(1);
     } finally {
       dispose();
@@ -165,7 +168,7 @@ describe('auto bridge apply wiring', () => {
       // 翻转回 true 时重新安装补丁并重新注册监听
       await h.setValue({ autoBridge: { enabled: true, maxImagesPerMessage: 4 } });
       expect(h.llm.resolveModelInfo).not.toBe(pristine);
-      expect(h.listeners.map((l) => l.name)).toEqual(['session/event']);
+      expect(h.listeners.map((l) => l.name)).toEqual(['session/created', 'session/disposed']);
       const again = await h.llm.resolveModelInfo('deepseek', 'chat');
       expect(again.inputModalities).toContain('image');
 
@@ -186,23 +189,30 @@ describe('auto bridge apply wiring', () => {
     const dispose = await apply(h.ctx as never, {});
     try {
       expect(h.llm.resolveModelInfo).not.toBe(pristine);
-      expect(h.listeners).toHaveLength(1);
+      expect(h.listeners).toHaveLength(2);
     } finally {
       dispose();
     }
     expect(h.llm.resolveModelInfo).toBe(pristine);
   });
 
-  it('bridges a pasted image through the listener apply installed, honoring maxImages', async () => {
+  it('bridges a pasted image through the wrapped session append, honoring maxImages', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dvt-wiring-session-'));
     try {
       const h = makeFakeCtx({ autoBridge: { enabled: true, maxImagesPerMessage: 2 } });
       const dispose = await apply(h.ctx as never, {});
       try {
         const session = fakeSession(cwd);
-        h.fire('session/event', session, imageEvent(3, 3));
-        await vi.waitFor(() => expect(session.events).toHaveLength(1));
-        const text = (session.events[0]!.data as { content: Array<{ text?: string }> }).content.map((b) => b.text ?? '').join('');
+        // apply 安装的桥接在 session/created 时包装 session.append;
+        // 宿主随后同步 append 带图消息 → 占位同步落地,分析异步替换占位
+        h.fire('session/created', session);
+        session.append('user/message', imageEvent(3, 3).data, { surfaceOp: 'append' });
+        await vi.waitFor(() => expect(session.events).toHaveLength(3));
+        // 日志顺序:原消息 → 占位 → 最终;断言最终替换事件(以占位 seq 为目标)
+        expect(session.events.map((e) => (e.data as { id: string }).id)).toEqual(['m3', 'm3-bridge-pending', 'm3-bridge']);
+        const final = session.events[2]!;
+        expect((final.intent as { surfaceOp: unknown }).surfaceOp).toEqual({ op: 'replace', start: 1, end: 1 });
+        const text = (final.data as { content: Array<{ text?: string }> }).content.map((b) => b.text ?? '').join('');
         // runtimeSource 桩抛"未就绪"→ 分析降级为失败说明
         expect(text).toContain('[图片自动分析]失败(dsh-vision-toolkit runtime is not ready)');
         expect(text).toContain('本条消息共 3 张图片,仅分析前 2 张');
@@ -225,9 +235,12 @@ describe('auto bridge apply wiring', () => {
       const dispose = await apply(h.ctx as never, {});
       try {
         const session = fakeSession(cwd);
-        h.fire('session/event', session, imageEvent(5));
-        await vi.waitFor(() => expect(session.events).toHaveLength(1));
-        const text = (session.events[0]!.data as { content: Array<{ text?: string }> }).content.map((b) => b.text ?? '').join('');
+        h.fire('session/created', session);
+        session.append('user/message', imageEvent(5).data, { surfaceOp: 'append' });
+        await vi.waitFor(() => expect(session.events).toHaveLength(3));
+        const final = session.events[2]!;
+        expect((final.intent as { surfaceOp: unknown }).surfaceOp).toEqual({ op: 'replace', start: 1, end: 1 });
+        const text = (final.data as { content: Array<{ text?: string }> }).content.map((b) => b.text ?? '').join('');
         expect(text).toContain('[图片自动分析]处理失败(attachment gone)');
       } finally {
         dispose();
@@ -237,17 +250,33 @@ describe('auto bridge apply wiring', () => {
     }
   });
 
-  it('logs a warning instead of an unhandled rejection when handling a malformed session', async () => {
-    const h = makeFakeCtx();
-    const dispose = await apply(h.ctx as never, {});
+  it('logs a warning instead of crashing when a session rejects the placeholder append', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dvt-wiring-session-'));
     try {
-      // 无 header 的畸形 session:同步抛错必须被监听器 .catch() 兜底(仅 warn)
-      h.fire('session/event', {}, imageEvent(1));
-      await vi.waitFor(() => {
-        expect(h.calls.some((c) => c.level === 'warn' && c.scope === 'vision-toolkit/auto-bridge' && String(c.args[0]).includes('handling failed'))).toBe(true);
-      });
+      const h = makeFakeCtx();
+      const dispose = await apply(h.ctx as never, {});
+      try {
+        // 会话不可写(宿主 reentrancy 守卫语义):替换意图的 append 被拒 → 仅 warn,不分析
+        const session = {
+          events: [],
+          header: { cwd },
+          append(type: string, data: unknown, intent?: { surfaceOp?: { op?: string } }) {
+            if (intent?.surfaceOp?.op === 'replace') throw new Error('cannot reenter');
+            session.events.push({ type, data, intent });
+            return { seq: session.events.length - 1 };
+          },
+        };
+        h.fire('session/created', session);
+        expect(() => session.append('user/message', imageEvent(1).data, { surfaceOp: 'append' })).not.toThrow();
+        expect(session.events).toHaveLength(1);
+        await vi.waitFor(() => {
+          expect(h.calls.some((c) => c.level === 'warn' && c.scope === 'vision-toolkit/auto-bridge' && String(c.args[0]).includes('placeholder append failed'))).toBe(true);
+        });
+      } finally {
+        dispose();
+      }
     } finally {
-      dispose();
+      await rm(cwd, { recursive: true, force: true });
     }
   });
 });

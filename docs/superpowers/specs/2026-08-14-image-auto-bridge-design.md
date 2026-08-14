@@ -75,7 +75,7 @@ Agent 需要深入时,仍可调用 10 个视觉工具(描述中附带图片引�
 - `tools.js` 只做提取共用函数的小重构,10 个工具的 schema 与行为不变。
 - 桥接任何异常绝不阻断消息发送(降级为占位文本)。
 - Settings 关闭桥接后行为完全回到现状(关卡照旧拒绝图片)。
-- 模态拦截只在桥接启用时注册,注销后无残留;只影响目标 provider/model。
+- 模态拦截只在桥接启用时注册,注销后无残留。**实际作用域比设计承诺更宽**:补丁以进程级 `llm.resolveModelInfo` 包装实现,会对所有声明 `inputModalities` 且缺 image 的模型追加 image,不区分 provider/model——当前部署为单 provider(deepseek),该作用域可接受;多 provider 部署需在补丁内按 provider/model 加过滤(见"已逐一勘察")。
 
 ## 错误处理
 
@@ -91,7 +91,7 @@ Agent 需要深入时,仍可调用 10 个视觉工具(描述中附带图片引�
 1. **单元测试**(仓库现有 vitest 基建):`autoBridge` 配置解析与默认值;派生事件构造与
    `sourceEventSeqs` 关联;视觉 API 失败分类 → 占位文本映射。
 2. **集成测试**(mock 视觉 API):粘贴图片 → 会话日志出现派生描述事件;API 失败 → 降级
-   文本且消息照常;桥接关闭 → 恢复关卡拒绝;模态拦截只影响目标模型。
+   文本且消息照常;桥接关闭 → 恢复关卡拒绝;模态拦截覆盖进程内所有声明 inputModalities 且缺 image 的模型(当前单 provider 部署;多 provider 需在补丁内加过滤)。
 3. **手动验收**(真实环境):`dsh web` 启动 → 粘贴图片 → 消息带预览正常发出、Agent 收到
    描述 → Agent 可继续调 `vision_pixel_diff` 深入;Settings 开关即时生效。
 4. **回归**:本仓库 vitest 全绿;10 个视觉工具行为不变。
@@ -107,7 +107,7 @@ Agent 需要深入时,仍可调用 10 个视觉工具(描述中附带图片引�
 
 ## 实现期需验证的关键点(已逐一勘察,结论如下)
 
-- [x] **`ctx.intercept` 不支持方法拦截**(此 fork 中 intercept 只做 service config 合并)。改用运行时补丁 `llm.resolveModelInfo` 注入图片模态;proxy 可写性由 Task 1 spike 验证,不可写则退回原型链补丁
+- [x] **`ctx.intercept` 不支持方法拦截**(此 fork 中 intercept 只做 service config 合并)。改用运行时补丁 `llm.resolveModelInfo` 注入图片模态;proxy 可写性由 Task 1 spike 验证,不可写则退回原型链补丁。**作用域(与实际一致)**:该补丁是进程级 `resolveModelInfo` 包装,对所有声明 `inputModalities` 且缺 image 的模型追加 image,不限定 provider/model——与接口边界原承诺"只影响目标 provider/model"不符,已在接口边界处改为实际描述;当前单 provider 部署可接受,多 provider 部署需在 `wrap` 内加 provider/model 过滤
 - [x] **图片原消息的模型历史投影**:deepseek 适配器对图片块是**显式拒绝**(`assertTextOnly` 抛 `UNSUPPORTED_CONTENT`),不是静默丢弃。因此必须用 surface 替换:桥接追加带 `{op:'replace',start,end}` 意图的 `user/message` 事件(纯文本版),原事件保留在日志、仅模型历史被遮蔽——宿主明确支持该机制(compaction 同款,"replacement copies stay model-only")
 - [x] 事件词汇表:`user/message`(数据即 dsh-llm `UserMessage`,`content` 为 `ContentBlock[]`,`image` 块为 `{type:'image', attachment: ImageAttachmentRef}`);`Session.append(type, data, SurfaceIntent)`;监听 `ctx.on('session/event', (session, event) => ...)`
 - [x] 图片载荷:`session.prompt` RPC 的 `content` 中图片块为内联 base64(`{type:'image', data, mediaType, name?}`),由 `durablePromptContent` 经 `ctx.attachments.saveImage` 落库为引用块;关卡检查在其之前

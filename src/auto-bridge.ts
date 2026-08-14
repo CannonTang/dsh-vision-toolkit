@@ -1,8 +1,19 @@
 /**
- * Pasted-image auto bridge: listens for user messages carrying image blocks,
- * analyzes each image through the shared analyzer, and appends a text-only
- * replacement surface event so the text-only model sees descriptions while
- * the original event stays in the durable log.
+ * Pasted-image auto bridge: wraps each live session's append so a user message
+ * carrying image blocks gets a synchronous text-only placeholder event, then
+ * analyzes every image through the shared analyzer and replaces the placeholder
+ * with the real descriptions while the original event stays in the durable log.
+ *
+ * The host appends `user/message` and derives the first LLM request in one
+ * synchronous block (and the DeepSeek adapter rejects image blocks outright),
+ * so the text-only replacement must land synchronously, before the first await.
+ * A `session/event` listener cannot do that: the host session forbids append
+ * reentry while an append is being published. Instead the bridge wraps
+ * `session.append` on every live session (runtime patch, same pattern as the
+ * modality patch): when the appended message carries image blocks, the wrapper
+ * appends a placeholder `{op:'replace', start, end}` event targeting the
+ * original message right after the host append returns, then fires the
+ * analysis; the final replacement targets the placeholder's seq.
  * @module dsh-vision-toolkit/auto-bridge
  */
 
@@ -32,10 +43,13 @@ export interface BridgeLogger {
   error?(message?: unknown, ...args: unknown[]): void
 }
 
+/** Raw append shape the wrapper captures and forwards. */
+type RawAppend = (type: string, data: unknown, ...opts: unknown[]) => SessionEvent
+
 /** Dependencies injected by the plugin wiring. */
 export interface ImageAutoBridgeDeps {
-  /** Cordis context used to subscribe to the session event feed. */
-  ctx: Pick<Context, 'on'>
+  /** Cordis context used to enumerate live sessions and subscribe to their lifecycle. */
+  ctx: Pick<Context, 'on'> & { sessions?: { list?: () => Session[] } }
   /** Provides the vision runtime each per-session analyzer runs against. */
   runtimeSource: () => VisionToolkitRuntime
   /** Durable attachment store; image bytes are read back through this seam. */
@@ -47,11 +61,15 @@ export interface ImageAutoBridgeDeps {
 }
 
 export class ImageAutoBridge {
-  #ctx: Pick<Context, 'on'>
+  #ctx: Pick<Context, 'on'> & { sessions?: { list?: () => Session[] } }
   #runtimeSource: () => VisionToolkitRuntime
   #attachments: AttachmentStore
   #maxImages: number
   #logger: BridgeLogger
+  /** Sessions whose append is wrapped; iteration lets the disposer restore them exactly. */
+  #wrapped = new Set<Session>()
+  /** The exact original append captured per wrapped session. */
+  #originals = new WeakMap<Session, RawAppend>()
 
   constructor(deps: ImageAutoBridgeDeps) {
     this.#ctx = deps.ctx
@@ -62,28 +80,128 @@ export class ImageAutoBridge {
   }
 
   /**
-   * Subscribe to the session event feed. The returned disposer unsubscribes
-   * and makes any in-flight handle orphan-safe (its append is best effort).
+   * Start bridging: wrap every live session's append (and keep wrapping
+   * sessions created from now on) so image-bearing user messages land a
+   * synchronous text-only placeholder before the agent loop projects model
+   * history, then analyze asynchronously and swap the placeholder for the
+   * real descriptions. The returned disposer unsubscribes and restores every
+   * wrapped append; an in-flight analysis still finishes after disposal
+   * (best effort, never left as an unhandled rejection).
    */
   start(): () => void {
-    return this.#ctx.on('session/event', (session, event) => {
-      if (event.type !== 'user/message') return
-      const imageBlocks = event.data.content.filter((block) => block.type === 'image')
-      if (imageBlocks.length === 0) return
-      void this.#handle(session, event, imageBlocks).catch((error) => {
+    for (const session of this.#liveSessions()) this.#wrapSession(session)
+    const created = this.#ctx.on('session/created', (session: Session) => {
+      this.#wrapSession(session)
+    })
+    const disposed = this.#ctx.on('session/disposed', (session: Session) => {
+      this.#unwrapSession(session)
+    })
+    return () => {
+      created()
+      disposed()
+      for (const session of [...this.#wrapped]) this.#unwrapSession(session)
+    }
+  }
+
+  /** Live sessions known to the store, or [] when the seam is unavailable. */
+  #liveSessions(): Session[] {
+    const sessions = this.#ctx.sessions
+    if (typeof sessions?.list !== 'function') return []
+    try {
+      return sessions.list()
+    } catch (error) {
+      this.#logger.warn('auto-bridge: cannot enumerate live sessions: %s', error instanceof Error ? error.message : String(error))
+      return []
+    }
+  }
+
+  /**
+   * Wrap one session's append so an appended user message with image blocks
+   * is synchronously shadowed by a text-only placeholder event, and analysis
+   * is fired against that placeholder. Never throws: a session that cannot be
+   * wrapped just keeps its original append (events still flow, the race stays
+   * for that session but nothing else breaks).
+   */
+  #wrapSession(session: Session): void {
+    if (this.#wrapped.has(session)) return
+    const original = session.append as unknown as RawAppend
+    const wrapper = ((type: string, data: unknown, ...opts: unknown[]): SessionEvent => {
+      const event = original.call(session, type, data, ...opts)
+      if (type !== 'user/message') return event
+      const messageEvent = event as SessionEvent<'user/message'>
+      const imageBlocks = ((data as UserMessage).content ?? []).filter((block) => block.type === 'image')
+      if (imageBlocks.length === 0) return event
+      const paths = this.#precomputePaths(session, imageBlocks)
+      let placeholderSeq: number | undefined
+      try {
+        placeholderSeq = original.call(session, 'user/message', this.#placeholderMessage(messageEvent, paths), {
+          surfaceOp: { op: 'replace', start: messageEvent.seq, end: messageEvent.seq },
+          sourceEventSeqs: [messageEvent.seq],
+        }).seq
+      } catch (error) {
+        // Session not writable: keep the original append semantics and skip
+        // analysis rather than making the message send fail.
+        this.#logger.warn('auto-bridge: placeholder append failed: %s', error instanceof Error ? error.message : String(error))
+        return event
+      }
+      void this.#handleAsync(session, messageEvent, imageBlocks, placeholderSeq, paths).catch((error) => {
         this.#logger.warn('auto-bridge: handling failed: %s', error instanceof Error ? error.message : String(error))
       })
-    })
+      return event
+    }) as unknown as Session['append']
+    try {
+      session.append = wrapper
+      this.#wrapped.add(session)
+      this.#originals.set(session, original)
+    } catch (error) {
+      this.#logger.warn('auto-bridge: session append wrap failed: %s', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** Restore a session's exact original append. */
+  #unwrapSession(session: Session): void {
+    const original = this.#originals.get(session)
+    if (original !== undefined) session.append = original as Session['append']
+    this.#originals.delete(session)
+    this.#wrapped.delete(session)
+  }
+
+  /**
+   * The synchronous placeholder: the original message's non-image blocks plus
+   * one text note claiming the soon-to-be-written artifact paths, so the model
+   * sees a text-only message with usable image references from the very first
+   * request.
+   */
+  #placeholderMessage(event: SessionEvent<'user/message'>, paths: (string | undefined)[]): UserMessage {
+    const pathText = paths.slice(0, this.#maxImages).filter((path): path is string => path !== undefined)
+    const text = pathText.length === 0
+      ? `${BRIDGE_PREFIX} 分析中…`
+      : `${BRIDGE_PREFIX} 分析中…图片已保存:${pathText.join(', ')},可直接用 vision_glance 查看该路径获取内容`
+    return {
+      id: MessageId(`${event.data.id}-bridge-pending`),
+      role: 'user',
+      source: event.data.source,
+      content: [
+        ...event.data.content.filter((block) => block.type !== 'image'),
+        { type: 'text', text },
+      ],
+    }
   }
 
   /**
    * Read each image block from the attachment store, persist it inside the
    * session's managed artifact tree, analyze it through a fresh analyzer bound
-   * to that session's workspace, and append one text-only replacement surface
-   * event so the text-only model sees descriptions while the original event
-   * stays in the durable log.
+   * to that session's workspace, and append one text-only replacement event
+   * targeting the placeholder seq so the text-only model sees descriptions
+   * while the original event stays in the durable log.
    */
-  async #handle(session: Session, event: SessionEvent<'user/message'>, imageBlocks: ImageBlock[]): Promise<void> {
+  async #handleAsync(
+    session: Session,
+    event: SessionEvent<'user/message'>,
+    imageBlocks: ImageBlock[],
+    placeholderSeq: number,
+    paths: (string | undefined)[],
+  ): Promise<void> {
     const notes: string[] = []
     const limited = imageBlocks.length > this.#maxImages
     // The session workspace is only known per message, so the analyzer is
@@ -101,8 +219,13 @@ export class ImageAutoBridge {
           ? `${BRIDGE_PREFIX} ${outcome.answer}\n图片已保存:${savedPath},可用视觉工具深入分析`
           : `${BRIDGE_PREFIX}失败(${outcome.reason})\n图片已保存:${savedPath}`)
       } catch (error) {
+        // The path was already claimed by the placeholder; keep pointing at it
+        // so the model's image reference stays stable whether the write landed.
         const reason = error instanceof Error ? error.message : String(error)
-        notes.push(`${BRIDGE_PREFIX}处理失败(${reason})`)
+        const path = paths[index]
+        notes.push(path === undefined
+          ? `${BRIDGE_PREFIX}处理失败(${reason})`
+          : `${BRIDGE_PREFIX}处理失败(${reason})\n图片已保存:${path}`)
       }
       index += 1
     }
@@ -118,8 +241,8 @@ export class ImageAutoBridge {
     }
     try {
       session.append('user/message', replacement, {
-        surfaceOp: { op: 'replace', start: event.seq, end: event.seq },
-        sourceEventSeqs: [event.seq],
+        surfaceOp: { op: 'replace', start: placeholderSeq, end: placeholderSeq },
+        sourceEventSeqs: [placeholderSeq],
       })
     } catch (error) {
       this.#logger.warn('auto-bridge: replacement append failed: %s', error instanceof Error ? error.message : String(error))
@@ -151,5 +274,22 @@ export class ImageAutoBridge {
     const safe = ref.attachmentId.replace(/[^A-Za-z0-9._-]/g, '_')
     const stem = safe.length === 0 ? 'image' : safe
     return `${stem}-${index}${EXTENSION_BY_MEDIA_TYPE.get(ref.mediaType) ?? '.bin'}`
+  }
+
+  /**
+   * The paths the async analysis will write, precomputed deterministically so
+   * the synchronous placeholder can claim them before any await. An entry is
+   * `undefined` when the path cannot be derived (e.g. no session cwd).
+   */
+  #precomputePaths(session: Session, imageBlocks: ImageBlock[]): (string | undefined)[] {
+    const paths: (string | undefined)[] = []
+    for (let index = 0; index < imageBlocks.length; index += 1) {
+      try {
+        paths.push(join(this.#artifactRootFor(session), this.#artifactFilenameFor(imageBlocks[index]!.attachment, index)))
+      } catch {
+        paths.push(undefined)
+      }
+    }
+    return paths
   }
 }
