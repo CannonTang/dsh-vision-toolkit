@@ -121,7 +121,14 @@ def describe_image(image_url: str | list[str], prompt: str | None = None, max_to
     request = urllib.request.Request(
         base_url + "/chat/completions",
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + api_key,
+            # Cloudflare-fronted providers (e.g. micuapi) reject the default
+            # Python-urllib User-Agent with HTTP 403 / Cloudflare error 1010.
+            # A browser-like signature keeps vision requests routable.
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+        },
     )
     retries = 2
     timeout = 180
