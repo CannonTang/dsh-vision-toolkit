@@ -28,7 +28,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { AttachmentStore, ImageAttachmentRef, StoredImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { MessageId, type ContentBlock, type ImageBlock, type ToolResultBlock } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionEvent, ToolResultMessage, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 import type { Context } from 'cordis'
 import { ImageAnalyzer } from './auto-bridge-analyze.ts'
 import type { VisionToolkitRuntime } from './runtime.ts'
@@ -221,23 +221,23 @@ export class ImageAutoBridge {
   }
 
   /**
-   * The text-only replacement shadowing one image-bearing tool result: same
-   * turn/step and source, a fresh id, and the message content deep-copied with
-   * every image block replaced by a text note. The original event stays in
-   * the durable log; only the derived model history sees the replacement.
+   * The text-only replacement shadowing one image-bearing tool result: the
+   * original data with only the tool-result block's content rewritten (every
+   * image block becomes a text note). The host's `assertToolResultRewrite`
+   * requires everything but that content to stay deep-equal to the original —
+   * id, source, turn, step, toolCallId, isError, and any error/meta fields —
+   * so they are preserved verbatim. The original event stays in the durable
+   * log; only the derived model history sees the replacement.
    */
-  #toolResultReplacement(event: SessionEvent<'tool/result'>): { turn: number; step: number; message: ToolResultMessage } {
+  #toolResultReplacement(event: SessionEvent<'tool/result'>): SessionEvent<'tool/result'>['data'] {
     const message = event.data.message
     // ToolResultMessage content is exactly one tool-result block; rebuild it as
     // a one-element tuple so the replacement keeps the message shape.
     const [toolResultBlock] = message.content
     return {
-      turn: event.data.turn,
-      step: event.data.step,
+      ...event.data,
       message: {
-        id: MessageId(`${message.id}-bridge`),
-        role: 'user',
-        source: message.source,
+        ...message,
         content: [this.#replacedToolResultBlock(toolResultBlock)],
       },
     }

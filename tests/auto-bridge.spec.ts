@@ -14,13 +14,27 @@ function fakeEvents() {
 }
 // 假 session:记录 append 调用;header.cwd 即会话工作目录(真实 Session.header.cwd)。
 // append 返回被记录的事件本身,与宿主 Session.append 契约一致(返回带 seq/data 的
-// 已记录事件快照)。
+// 已记录事件快照)。tool/result 替换额外实现宿主 assertToolResultRewrite 的简化等价
+// 校验:除 tool-result 块 content 外其余数据(含 message.id)必须与原事件一致,否则同步抛错。
 function fakeSession(cwd) {
   const events = [];
   return {
     events,
     header: { cwd },
     append(type, data, intent) {
+      if (type === 'tool/result' && intent?.surfaceOp?.op === 'replace') {
+        const original = events[intent.surfaceOp.start];
+        const origResult = original?.data?.message?.content?.[0];
+        const replResult = data?.message?.content?.[0];
+        const restEqual = original?.data?.turn === data.turn
+          && original?.data?.step === data.step
+          && original?.data?.message?.id === data.message?.id
+          && original?.data?.message?.role === data.message?.role
+          && JSON.stringify(original?.data?.message?.source) === JSON.stringify(data.message?.source)
+          && origResult?.toolCallId === replResult?.toolCallId
+          && (origResult?.isError ?? null) === (replResult?.isError ?? null);
+        if (!restEqual) throw new Error('tool/result surface replacement may change only content');
+      }
       const event = { type, data, intent, seq: events.length };
       events.push(event);
       return event;
@@ -271,7 +285,9 @@ describe('ImageAutoBridge', () => {
     expect(replacement.intent.surfaceOp).toEqual({ op: 'replace', start: 0, end: 0 });
     expect(replacement.intent.sourceEventSeqs).toEqual([0]);
     const message = replacement.data.message;
-    expect(message.id).toBe('tr0-bridge');
+    // 宿主 assertToolResultRewrite 不变量:替换事件除 tool-result 块 content 外
+    // 必须与原事件深度相等,message.id 原样保留
+    expect(message.id).toBe(session.events[0].data.message.id);
     expect(message.role).toBe('user');
     expect(message.source).toEqual({ kind: 'tool', callId: 'call_read_image' });
     expect(message.content).toHaveLength(1);
