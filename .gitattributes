@@ -1,0 +1,4 @@
+# The vendored upstream snapshot is byte-integrity-checked at runtime
+# (contentSha256 in UPSTREAM_MANIFEST.json). Force LF on every platform so
+# Windows core.autocrlf cannot rewrite its line endings and trip the check.
+vendor/agent-vision-toolkit/** text eol=lf
