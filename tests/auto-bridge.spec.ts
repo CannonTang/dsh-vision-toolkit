@@ -48,6 +48,34 @@ const hostAppend = (session, event) => session.append(event.type, event.data, { 
 const expectedArtifactRoot = (cwd) => join(cwd, '.dsh-vision-toolkit', 'artifacts', 'bridge');
 const expectedSavedPath = (cwd, seq) => join(expectedArtifactRoot(cwd), 'img-1-0.png');
 
+// 递归工具:内容树任意层级是否存在 image 块;拼接全部 text 文本
+const hasImageBlocks = (blocks) => blocks.some((b) => b.type === 'image' || (b.type === 'tool-result' && hasImageBlocks(b.content)));
+const collectText = (blocks) => blocks.map((b) => (b.type === 'text' ? b.text : b.type === 'tool-result' ? collectText(b.content) : '')).join('');
+
+// 与真实宿主 read_image 结果一致的 tool/result 事件:相邻 text 块携带 <path> 信封,其后是 image 块
+const makeToolResultEvent = (seq, callId = 'call_read_image', id = `tr${seq}`) => ({
+  seq,
+  type: 'tool/result',
+  data: {
+    turn: 1,
+    step: 2,
+    message: {
+      id,
+      role: 'user',
+      source: { kind: 'tool', callId },
+      content: [{
+        type: 'tool-result',
+        toolCallId: callId,
+        isError: false,
+        content: [
+          { type: 'text', text: '<path>/tmp/shot.png</path>\n<type>image</type>\n<content>\nimage/png image, 1200x800 px, 54321 bytes\n</content>' },
+          { type: 'image', attachment: { attachmentId: 'img-9', mediaType: 'image/png', bytes: 54321, width: 1200, height: 800, name: 'shot.png' } },
+        ],
+      }],
+    },
+  },
+});
+
 describe('ImageAutoBridge', () => {
   it('appends a text replacement event when a user message carries an image', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dvt-bridge-session-'));
@@ -212,6 +240,8 @@ describe('ImageAutoBridge', () => {
       expect(text).toContain('分析中');
       expect(text).toContain(`图片已保存:${expectedSavedPath(cwd, 3)}`);
       expect(text).toContain('看这张图');
+      // 占位文本必须禁调 read_image:本模型上下文无法接收图片块
+      expect(text).toContain('不要调用 read_image(当前模型无法接收图片内容);请直接调用 vision_glance 查看该路径。');
       // 异步链尚未推进:readImage 仍 pending,glance 未被调用
       expect(glanceCalls).toHaveLength(0);
       resolveRead();
@@ -220,6 +250,68 @@ describe('ImageAutoBridge', () => {
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
+  });
+  it('synchronously shadows a tool result whose message carries image blocks', () => {
+    const events = fakeEvents();
+    const session = fakeSession(undefined);
+    const bridge = new ImageAutoBridge({
+      ctx: { on: events.on },
+      runtimeSource: () => ({ glance: async () => { throw new Error('unused'); } }),
+      attachments: { readImage: async (ref) => ({ ref, data: new Uint8Array([1]) }) },
+      maxImages: 4,
+      logger: { info() {}, warn() {} },
+    });
+    const stop = bridge.start();
+    events.fire('session/created', session);
+    session.append('tool/result', makeToolResultEvent(0).data, { surfaceOp: 'append' });
+    // 零等待:替换事件必须在同一同步块落地(与用户消息占位同机制)
+    expect(session.events).toHaveLength(2);
+    const replacement = session.events[1];
+    expect(replacement.type).toBe('tool/result');
+    expect(replacement.intent.surfaceOp).toEqual({ op: 'replace', start: 0, end: 0 });
+    expect(replacement.intent.sourceEventSeqs).toEqual([0]);
+    const message = replacement.data.message;
+    expect(message.id).toBe('tr0-bridge');
+    expect(message.role).toBe('user');
+    expect(message.source).toEqual({ kind: 'tool', callId: 'call_read_image' });
+    expect(message.content).toHaveLength(1);
+    expect(message.content[0].type).toBe('tool-result');
+    // toolCallId 与 isError 保留
+    expect(message.content[0].toolCallId).toBe('call_read_image');
+    expect(message.content[0].isError).toBe(false);
+    // 模型历史不变量:任何层级不得有 image 块
+    expect(hasImageBlocks(message.content)).toBe(false);
+    const text = collectText(message.content);
+    expect(text).toContain('该图片无法直接进入模型上下文:image/png 1200x800 px, 54321 bytes');
+    // path 取自相邻 text 块的 <path> 信封
+    expect(text).toContain('已保存于 /tmp/shot.png');
+    expect(text).toContain('请调用 vision_glance 传入该路径查看图片内容');
+    stop();
+  });
+  it('does not shadow a tool result without image blocks', () => {
+    const events = fakeEvents();
+    const session = fakeSession(undefined);
+    const bridge = new ImageAutoBridge({
+      ctx: { on: events.on },
+      runtimeSource: () => ({ glance: async () => { throw new Error('unused'); } }),
+      attachments: { readImage: async (ref) => ({ ref, data: new Uint8Array([1]) }) },
+      maxImages: 4,
+      logger: { info() {}, warn() {} },
+    });
+    const stop = bridge.start();
+    events.fire('session/created', session);
+    session.append('tool/result', {
+      turn: 1,
+      step: 2,
+      message: {
+        id: 'tr2',
+        role: 'user',
+        source: { kind: 'tool', callId: 'call_text' },
+        content: [{ type: 'tool-result', toolCallId: 'call_text', content: [{ type: 'text', text: '<path>/tmp/a.txt</path>\nok' }] }],
+      },
+    }, { surfaceOp: 'append' });
+    expect(session.events).toHaveLength(1);
+    stop();
   });
   it('replaces the placeholder (not the original) with the final text in log order', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dvt-bridge-session-'));

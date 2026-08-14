@@ -3,6 +3,11 @@
  * carrying image blocks gets a synchronous text-only placeholder event, then
  * analyzes every image through the shared analyzer and replaces the placeholder
  * with the real descriptions while the original event stays in the durable log.
+ * A `tool/result` whose message carries image blocks (the host `read_image`
+ * tool, admitted by the modality patch, returns such blocks) gets the same
+ * synchronous treatment: one text-only replacement event lands before the loop
+ * derives model history, keeping the invariant that the model never sees image
+ * blocks.
  *
  * The host appends `user/message` and derives the first LLM request in one
  * synchronous block (and the DeepSeek adapter rejects image blocks outright),
@@ -13,7 +18,9 @@
  * modality patch): when the appended message carries image blocks, the wrapper
  * appends a placeholder `{op:'replace', start, end}` event targeting the
  * original message right after the host append returns, then fires the
- * analysis; the final replacement targets the placeholder's seq.
+ * analysis; the final replacement targets the placeholder's seq. A
+ * `tool/result` carrying image blocks is shadowed the same way, with one
+ * replacement event targeting the original seq.
  * @module dsh-vision-toolkit/auto-bridge
  */
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment';

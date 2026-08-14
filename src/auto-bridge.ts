@@ -3,6 +3,11 @@
  * carrying image blocks gets a synchronous text-only placeholder event, then
  * analyzes every image through the shared analyzer and replaces the placeholder
  * with the real descriptions while the original event stays in the durable log.
+ * A `tool/result` whose message carries image blocks (the host `read_image`
+ * tool, admitted by the modality patch, returns such blocks) gets the same
+ * synchronous treatment: one text-only replacement event lands before the loop
+ * derives model history, keeping the invariant that the model never sees image
+ * blocks.
  *
  * The host appends `user/message` and derives the first LLM request in one
  * synchronous block (and the DeepSeek adapter rejects image blocks outright),
@@ -13,20 +18,27 @@
  * modality patch): when the appended message carries image blocks, the wrapper
  * appends a placeholder `{op:'replace', start, end}` event targeting the
  * original message right after the host append returns, then fires the
- * analysis; the final replacement targets the placeholder's seq.
+ * analysis; the final replacement targets the placeholder's seq. A
+ * `tool/result` carrying image blocks is shadowed the same way, with one
+ * replacement event targeting the original seq.
  * @module dsh-vision-toolkit/auto-bridge
  */
 
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { AttachmentStore, ImageAttachmentRef, StoredImageAttachment } from '@deepseek-ai/dsh-attachment'
-import { MessageId, type ImageBlock } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
+import { MessageId, type ContentBlock, type ImageBlock, type ToolResultBlock } from '@deepseek-ai/dsh-llm'
+import type { Session, SessionEvent, ToolResultMessage, UserMessage } from '@deepseek-ai/dsh-session'
 import type { Context } from 'cordis'
 import { ImageAnalyzer } from './auto-bridge-analyze.ts'
 import type { VisionToolkitRuntime } from './runtime.ts'
 
 const BRIDGE_PREFIX = '[图片自动分析]'
+/**
+ * Appended to the placeholder text: this text-only model cannot receive image
+ * blocks, so the model must reach the saved images through the vision tool.
+ */
+const READ_IMAGE_GUIDANCE = '不要调用 read_image(当前模型无法接收图片内容);请直接调用 vision_glance 查看该路径。'
 /** Subdirectory of the plugin-managed artifact tree that owns bridge saves. */
 const BRIDGE_ARTIFACT_DIR = 'bridge'
 const EXTENSION_BY_MEDIA_TYPE = new Map<string, string>([
@@ -127,6 +139,26 @@ export class ImageAutoBridge {
     const original = session.append as unknown as RawAppend
     const wrapper = ((type: string, data: unknown, ...opts: unknown[]): SessionEvent => {
       const event = original.call(session, type, data, ...opts)
+      if (type === 'tool/result') {
+        // Same synchronous-shadow mechanism as user messages: a tool result
+        // carrying image blocks (host read_image, admitted by the modality
+        // patch) would fail the next LLM request on the text-only adapter, so
+        // a text-only replacement must land before the loop derives history.
+        const toolResultEvent = event as SessionEvent<'tool/result'>
+        if (this.#containsImage(toolResultEvent.data.message.content)) {
+          try {
+            original.call(session, 'tool/result', this.#toolResultReplacement(toolResultEvent), {
+              surfaceOp: { op: 'replace', start: toolResultEvent.seq, end: toolResultEvent.seq },
+              sourceEventSeqs: [toolResultEvent.seq],
+            })
+          } catch (error) {
+            // Session not writable: keep the original append semantics and let
+            // the round fail on the adapter rather than break the tool call.
+            this.#logger.warn('auto-bridge: tool result shadow append failed: %s', error instanceof Error ? error.message : String(error))
+          }
+        }
+        return event
+      }
       if (type !== 'user/message') return event
       const messageEvent = event as SessionEvent<'user/message'>
       const imageBlocks = ((data as UserMessage).content ?? []).filter((block) => block.type === 'image')
@@ -175,8 +207,8 @@ export class ImageAutoBridge {
   #placeholderMessage(event: SessionEvent<'user/message'>, paths: (string | undefined)[]): UserMessage {
     const pathText = paths.slice(0, this.#maxImages).filter((path): path is string => path !== undefined)
     const text = pathText.length === 0
-      ? `${BRIDGE_PREFIX} 分析中…`
-      : `${BRIDGE_PREFIX} 分析中…图片已保存:${pathText.join(', ')},可直接用 vision_glance 查看该路径获取内容`
+      ? `${BRIDGE_PREFIX} 分析中…${READ_IMAGE_GUIDANCE}`
+      : `${BRIDGE_PREFIX} 分析中…图片已保存:${pathText.join(', ')},可直接用 vision_glance 查看该路径获取内容。${READ_IMAGE_GUIDANCE}`
     return {
       id: MessageId(`${event.data.id}-bridge-pending`),
       role: 'user',
@@ -186,6 +218,84 @@ export class ImageAutoBridge {
         { type: 'text', text },
       ],
     }
+  }
+
+  /**
+   * The text-only replacement shadowing one image-bearing tool result: same
+   * turn/step and source, a fresh id, and the message content deep-copied with
+   * every image block replaced by a text note. The original event stays in
+   * the durable log; only the derived model history sees the replacement.
+   */
+  #toolResultReplacement(event: SessionEvent<'tool/result'>): { turn: number; step: number; message: ToolResultMessage } {
+    const message = event.data.message
+    // ToolResultMessage content is exactly one tool-result block; rebuild it as
+    // a one-element tuple so the replacement keeps the message shape.
+    const [toolResultBlock] = message.content
+    return {
+      turn: event.data.turn,
+      step: event.data.step,
+      message: {
+        id: MessageId(`${message.id}-bridge`),
+        role: 'user',
+        source: message.source,
+        content: [this.#replacedToolResultBlock(toolResultBlock)],
+      },
+    }
+  }
+
+  /** Whether any image block exists anywhere in the content tree (nested tool-result content included). */
+  #containsImage(blocks: readonly ContentBlock[]): boolean {
+    for (const block of blocks) {
+      if (block.type === 'image') return true
+      if (block.type === 'tool-result' && this.#containsImage(block.content)) return true
+    }
+    return false
+  }
+
+  /** One tool-result block deep-copied with every image block inside replaced by text. */
+  #replacedToolResultBlock(block: ToolResultBlock): ToolResultBlock {
+    const content = block.content.map((inner, index) => this.#replacedBlock(inner, block.content, index))
+    if (block.isError === undefined) return { type: 'tool-result', toolCallId: block.toolCallId, content }
+    return { type: 'tool-result', toolCallId: block.toolCallId, isError: block.isError, content }
+  }
+
+  /** One content block deep-copied; image blocks become the model-facing text note. */
+  #replacedBlock(block: ContentBlock, siblings: readonly ContentBlock[], index: number): ContentBlock {
+    if (block.type === 'image') return { type: 'text', text: this.#imageReplacementText(block, siblings, index) }
+    if (block.type === 'tool-result') return this.#replacedToolResultBlock(block)
+    return { ...block }
+  }
+
+  /**
+   * The text note standing in for one image block: media type and intrinsic
+   * dimensions come from the attachment reference; the saved path comes from
+   * the adjacent text blocks (the host `read_image` envelope renders
+   * `<path>…</path>` beside its image block), falling back to the attachment
+   * name, then omitted entirely so the note never throws.
+   */
+  #imageReplacementText(block: ImageBlock, siblings: readonly ContentBlock[], index: number): string {
+    const { mediaType, bytes, width, height } = block.attachment
+    const path = this.#adjacentPath(siblings, index, block.attachment.name)
+    const saved = path === undefined ? '' : `,已保存于 ${path}`
+    const glance = path === undefined
+      ? '请调用 vision_glance 查看该图片内容'
+      : '请调用 vision_glance 传入该路径查看图片内容'
+    return `该图片无法直接进入模型上下文:${mediaType} ${width}x${height} px, ${bytes} bytes${saved}。${glance}。`
+  }
+
+  /** The path beside the image block: an adjacent text block's `<path>` envelope, else the attachment name. */
+  #adjacentPath(siblings: readonly ContentBlock[], index: number, fallbackName?: string): string | undefined {
+    const before = index > 0 ? siblings[index - 1] : undefined
+    const after = index + 1 < siblings.length ? siblings[index + 1] : undefined
+    const beforePath = before !== undefined && before.type === 'text' ? this.#pathFromText(before.text) : undefined
+    const afterPath = after !== undefined && after.type === 'text' ? this.#pathFromText(after.text) : undefined
+    return beforePath ?? afterPath ?? fallbackName
+  }
+
+  /** Extract the path rendered inside a `<path>…</path>` envelope, when present. */
+  #pathFromText(text: string): string | undefined {
+    const match = /<path>([\s\S]*?)<\/path>/.exec(text)
+    return match?.[1]
   }
 
   /**
