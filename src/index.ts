@@ -11,8 +11,12 @@
 
 import type { Context } from 'cordis'
 import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-attachment'
+import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-settings'
 import { ArtifactAccessController, prepareArtifactAccessKey } from './artifact-access.ts'
+import { ImageAutoBridge } from './auto-bridge.ts'
+import { installImageModalityPatch } from './auto-bridge-modality.ts'
 import {
   Config,
   VISION_TOOLKIT_SETTINGS_NAMESPACE,
@@ -94,6 +98,42 @@ export async function apply(ctx: Context, config: VisionToolkitConfig = {}): Pro
 
   const backend = new VisionToolkitWebBackend(ctx, manager, artifacts, ensureOperational)
   installVisionToolkitWeb(ctx, backend, artifacts)
+  // Auto bridge lifecycle: while autoBridge.enabled is true the modality
+  // patch and the session listener are live; a Settings flip or plugin
+  // disposal removes both, and re-enabling reinstalls them fresh. ctx.llm is
+  // resolvable here (the llm service precedes this plugin in the readiness
+  // chain), so the instance-level patch applies.
+  let stopBridge: (() => void) | undefined
+  let restoreModality: (() => void) | undefined
+  const applyBridgeState = (): void => {
+    const enabled = settings.get().autoBridge?.enabled ?? true
+    if (enabled && stopBridge === undefined) {
+      try {
+        restoreModality = installImageModalityPatch(ctx.llm)
+        const bridge = new ImageAutoBridge({
+          ctx,
+          runtimeSource: () => manager.current(),
+          attachments: ctx.attachments,
+          maxImages: settings.get().autoBridge?.maxImagesPerMessage ?? 4,
+          logger: ctx.logger('vision-toolkit/auto-bridge'),
+        })
+        stopBridge = bridge.start()
+      } catch (error) {
+        // A refused patch or bridge start never takes the plugin down.
+        stopBridge?.()
+        stopBridge = undefined
+        restoreModality?.()
+        restoreModality = undefined
+        ctx.logger.warn('dsh-vision-toolkit: auto-bridge failed to start: %s', error instanceof Error ? error.message : String(error))
+      }
+    } else if (!enabled && stopBridge !== undefined) {
+      stopBridge()
+      stopBridge = undefined
+      restoreModality?.()
+      restoreModality = undefined
+    }
+  }
+  applyBridgeState()
   disposers.push(settings.watch(async (next) => {
     try {
       await manager.reconfigure(next)
@@ -102,6 +142,7 @@ export async function apply(ctx: Context, config: VisionToolkitConfig = {}): Pro
       const message = error instanceof Error ? error.message : String(error)
       ctx.logger.error('dsh-vision-toolkit: keeping the previous runtime after a refused Settings generation. %s', message)
     }
+    applyBridgeState()
   }))
 
   return () => {
@@ -113,5 +154,11 @@ export async function apply(ctx: Context, config: VisionToolkitConfig = {}): Pro
       operationalDisposers = undefined
     }
     for (const dispose of disposers.reverse()) dispose()
+    if (stopBridge !== undefined) {
+      stopBridge()
+      stopBridge = undefined
+    }
+    restoreModality?.()
+    restoreModality = undefined
   }
 }

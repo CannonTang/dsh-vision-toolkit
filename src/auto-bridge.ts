@@ -70,7 +70,9 @@ export class ImageAutoBridge {
       if (event.type !== 'user/message') return
       const imageBlocks = event.data.content.filter((block) => block.type === 'image')
       if (imageBlocks.length === 0) return
-      void this.#handle(session, event, imageBlocks)
+      void this.#handle(session, event, imageBlocks).catch((error) => {
+        this.#logger.warn('auto-bridge: handling failed: %s', error instanceof Error ? error.message : String(error))
+      })
     })
   }
 
@@ -100,7 +102,7 @@ export class ImageAutoBridge {
           : `${BRIDGE_PREFIX}失败(${outcome.reason})\n图片已保存:${savedPath}`)
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
-        notes.push(`${BRIDGE_PREFIX}读取失败(${reason})`)
+        notes.push(`${BRIDGE_PREFIX}处理失败(${reason})`)
       }
       index += 1
     }
