@@ -173,4 +173,69 @@ describe('VisionToolkitWebBackend', () => {
     })
     expect(plain.status).toBe(400)
   })
+
+  it('redacts provider.apiKey from snapshots while reporting apiKeyConfigured', async () => {
+    const { manager, post, base } = await setup()
+    const secret = 'sk-web-direct-secret'
+    const first = await post({
+      action: 'save',
+      expectedRevision: 0,
+      value: { provider: { baseUrl: 'https://vision.example/v1', model: 'm', apiKey: secret } },
+    })
+    const firstBody = await first.json() as {
+      ok: true
+      value: { apiKeyConfigured: boolean; settings: { value: { provider?: Record<string, unknown> }; revision: number } }
+    }
+    expect(first.status).toBe(200)
+    expect(firstBody.value.apiKeyConfigured).toBe(true)
+    expect(firstBody.value.settings.value.provider?.apiKey).toBeUndefined()
+    // The response never echoes the key, neither in the body nor its JSON form.
+    expect(JSON.stringify(firstBody)).not.toContain(secret)
+    // The runtime generation still received the key (it is needed to call the API).
+    expect(manager.status().activeConfig?.provider.apiKey).toBe(secret)
+
+    const snapshot = await (await fetch(base)).json() as {
+      ok: true; value: { apiKeyConfigured: boolean; settings: { value: { provider?: Record<string, unknown> } } }
+    }
+    expect(snapshot.value.apiKeyConfigured).toBe(true)
+    expect(snapshot.value.settings.value.provider?.apiKey).toBeUndefined()
+    expect(JSON.stringify(snapshot)).not.toContain(secret)
+  })
+
+  it('preserves the stored apiKey when a save omits it and replaces it when a new one is provided', async () => {
+    const { manager, post } = await setup()
+    const secret = 'sk-web-direct-secret'
+    const first = await post({
+      action: 'save',
+      expectedRevision: 0,
+      value: { provider: { baseUrl: 'https://vision.example/v1', model: 'm', apiKey: secret } },
+    })
+    expect(first.status).toBe(200)
+
+    // Saving without the apiKey field must not erase the configured key.
+    const preserved = await post({
+      action: 'save',
+      expectedRevision: 1,
+      value: { provider: { baseUrl: 'https://vision.example/v1', model: 'm2' } },
+    })
+    const preservedBody = await preserved.json() as { ok: true; value: { apiKeyConfigured: boolean } }
+    expect(preserved.status).toBe(200)
+    expect(preservedBody.value.apiKeyConfigured).toBe(true)
+    expect(JSON.stringify(preservedBody)).not.toContain(secret)
+    expect(manager.status().activeConfig?.provider.apiKey).toBe(secret)
+
+    // A non-empty apiKey in the save request replaces the stored one.
+    const next = 'sk-web-next-secret'
+    const replaced = await post({
+      action: 'save',
+      expectedRevision: 2,
+      value: { provider: { baseUrl: 'https://vision.example/v1', model: 'm3', apiKey: next } },
+    })
+    const replacedBody = await replaced.json() as { ok: true; value: { apiKeyConfigured: boolean } }
+    expect(replaced.status).toBe(200)
+    expect(replacedBody.value.apiKeyConfigured).toBe(true)
+    expect(JSON.stringify(replacedBody)).not.toContain(next)
+    expect(JSON.stringify(replacedBody)).not.toContain(secret)
+    expect(manager.status().activeConfig?.provider.apiKey).toBe(next)
+  })
 })

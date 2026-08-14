@@ -17,7 +17,6 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 
 const NS = 'vision-toolkit'
 const SETTINGS_ROUTE = '/_dsh/vision-toolkit/settings'
-const CREDENTIAL_ROUTE = '/_dsh/vision-toolkit/credential'
 const PRESENTATION_META_KEY = '$dshVisionToolkit'
 
 const en = {
@@ -28,13 +27,10 @@ const en = {
   provider: 'Vision service',
   baseUrl: 'Base URL',
   credential: 'Credential reference',
-  credentialHint: 'Enter the reference name here (e.g. VISION_API_KEY); store the API key itself in the credential vault via the input below.',
-  credentialKey: 'API Key',
-  saveCredential: 'Save to vault',
-  savingCredential: 'Saving…',
-  credentialSaved: 'Credential saved to the vault.',
-  credentialRefRequired: 'Enter the reference name first.',
-  credentialSaveFailed: 'The credential could not be saved.',
+  credentialHint: 'Advanced: used only when no API Key is set above (default VISION_API_KEY).',
+  apiKey: 'API Key',
+  apiKeyPlaceholderConfigured: 'Configured — enter a new value to override',
+  apiKeyPlaceholderNew: 'Paste API Key',
   model: 'Model',
   language: 'Output language',
   autoBridge: 'Auto image bridge',
@@ -100,13 +96,10 @@ const zh: Record<LocaleKey, string> = {
   provider: '视觉服务',
   baseUrl: '服务地址',
   credential: 'Credential 引用',
-  credentialHint: '此处填引用名(如 VISION_API_KEY);API Key 用下方输入框保存到凭据库。',
-  credentialKey: 'API Key',
-  saveCredential: '保存到凭据库',
-  savingCredential: '保存中…',
-  credentialSaved: '凭据已保存到凭据库。',
-  credentialRefRequired: '请先填写引用名。',
-  credentialSaveFailed: '凭据保存失败。',
+  credentialHint: '高级:上方未填 API Key 时才使用引用名(默认 VISION_API_KEY)。',
+  apiKey: 'API Key',
+  apiKeyPlaceholderConfigured: '已配置,输入新值可覆盖',
+  apiKeyPlaceholderNew: '粘贴 API Key',
   model: '模型',
   language: '输出语言',
   autoBridge: '图片自动桥接',
@@ -217,7 +210,7 @@ interface HealthResult {
 }
 
 interface SettingsValue {
-  provider?: { baseUrl?: string; credential?: string; model?: string }
+  provider?: { baseUrl?: string; credential?: string; apiKey?: string; model?: string }
   language?: 'zh' | 'en'
   autoBridge?: { enabled?: boolean; maxImagesPerMessage?: number }
   timeoutMs?: number
@@ -233,6 +226,8 @@ interface SettingsSnapshot {
   writable: boolean
   settings: { value: SettingsValue; revision: number; applies: 'live' }
   credential: { ref: string; configured: boolean; source?: string; writable: boolean }
+  /** Whether a direct provider.apiKey is stored; the value is never returned. */
+  apiKeyConfigured: boolean
   runtime: {
     ready: boolean
     generation: number
@@ -726,15 +721,17 @@ function LoadedSettings({ controller, t }: SettingsInjected) {
   const snapshot = state.snapshot
   const [draft, setDraft] = useState<Draft | undefined>(undefined)
   const [draftError, setDraftError] = useState<string | undefined>(undefined)
+  // Direct API key typed in the panel; submitted together with the other
+  // fields on the main Save. The stored value is never echoed back, only its
+  // configured-ness via `apiKeyConfigured`.
   const [apiKey, setApiKey] = useState('')
-  const [keySaving, setKeySaving] = useState(false)
-  const [keySaved, setKeySaved] = useState(false)
-  const [keyError, setKeyError] = useState<string | undefined>(undefined)
 
   useEffect(() => { if (state.status === 'idle') void controller.load() }, [controller, state.status])
   useEffect(() => {
     if (snapshot !== undefined) setDraft(draftOf(snapshot.settings.value))
-  }, [snapshot])
+    // Sync the draft only when the stored settings value actually changes, so
+    // a snapshot refresh (e.g. after a save) does not reset unsaved edits.
+  }, [snapshot?.settings.value])
 
   if (state.status === 'idle' || (state.status === 'loading' && snapshot === undefined)) {
     return <div className="dvt-settings"><div className="dvt-loading">{t('testing')}</div></div>
@@ -747,53 +744,23 @@ function LoadedSettings({ controller, t }: SettingsInjected) {
   const save = (): void => {
     try {
       setDraftError(undefined)
-      void controller.save(valueOf(draft), snapshot.settings.revision)
+      const value = valueOf(draft)
+      // A non-empty API Key field is carried in the one Save request; an
+      // empty field leaves the stored key untouched (server-side).
+      const key = apiKey.trim()
+      void controller.save(
+        key.length === 0 ? value : { ...value, provider: { ...value.provider, apiKey: key } },
+        snapshot.settings.revision,
+      )
     } catch (error) {
       setDraftError(error instanceof Error ? error.message : String(error))
     }
   }
   const busy = state.action !== undefined
   const runtimeErrorTitle = snapshot.runtime.ready ? t('runtimeCandidateRejected') : t('runtimeUnavailable')
-
-  // POST the API key to the same-origin credential route; the value stays in
-  // the browser input and the credential store — never in logs or errors.
-  const saveKey = async (): Promise<void> => {
-    const ref = draft.credential.trim()
-    if (ref.length === 0) {
-      setKeyError(t('credentialRefRequired'))
-      return
-    }
-    setKeySaving(true)
-    setKeyError(undefined)
-    setKeySaved(false)
-    try {
-      const response = await fetch(CREDENTIAL_ROUTE, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ref, value: apiKey }),
-      })
-      let body: unknown
-      try {
-        body = await response.json()
-      } catch {
-        body = undefined
-      }
-      if (!response.ok || !isRecord(body) || body.ok !== true) {
-        const failure = isRecord(body) && typeof body.error === 'string' && body.error.length > 0
-          ? body.error
-          : t('credentialSaveFailed')
-        throw new Error(failure)
-      }
-      setKeySaved(true)
-      setApiKey('')
-      void controller.load()
-    } catch (error) {
-      setKeyError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setKeySaving(false)
-    }
-  }
+  const credentialHint = snapshot.credential.configured && snapshot.credential.source !== undefined
+    ? `${t('credentialHint')} · ${t('source')}: ${snapshot.credential.source}`
+    : t('credentialHint')
 
   return (
     <div className="dvt-settings">
@@ -808,17 +775,14 @@ function LoadedSettings({ controller, t }: SettingsInjected) {
       {state.message === 'saved' ? <div className="dvt-alert success">{t('saved')}</div> : null}
       {snapshot.runtime.lastError === undefined ? null : <div className="dvt-alert error"><strong>{runtimeErrorTitle}</strong><span>{snapshot.runtime.lastError}</span></div>}
 
-      <section className="dvt-panel"><div className="dvt-panel-title"><h3>{t('provider')}</h3><span className={`dvt-badge ${snapshot.credential.configured ? 'ok' : 'error'}`}>{snapshot.credential.configured ? t('configured') : t('missing')}</span></div>
+      <section className="dvt-panel"><div className="dvt-panel-title"><h3>{t('provider')}</h3><span className={`dvt-badge ${snapshot.apiKeyConfigured || snapshot.credential.configured ? 'ok' : 'error'}`}>{snapshot.apiKeyConfigured || snapshot.credential.configured ? t('configured') : t('missing')}</span></div>
         <div className="dvt-form-grid">
           <Field label={t('baseUrl')}><Input value={draft.baseUrl} onChange={(event) => { update('baseUrl', event.target.value) }} /></Field>
           <Field label={t('model')}><Input value={draft.model} onChange={(event) => { update('model', event.target.value) }} /></Field>
-          <Field label={t('credential')} hint={`${t('credentialHint')}${snapshot.credential.source === undefined ? '' : ` · ${t('source')}: ${snapshot.credential.source}`}`}><Input value={draft.credential} onChange={(event) => { update('credential', event.target.value); setKeySaved(false); setKeyError(undefined) }} /></Field>
-          <Field label={t('credentialKey')} hint={keyError === undefined ? (keySaved ? t('credentialSaved') : undefined) : keyError}>
-            <div className="dvt-credential-row">
-              <Input type="password" autoComplete="new-password" value={apiKey} onChange={(event) => { setApiKey(event.target.value); setKeySaved(false); setKeyError(undefined) }} />
-              <Button size="sm" variant="outline" disabled={busy || keySaving || !snapshot.credential.writable} onClick={() => { void saveKey() }}>{keySaving ? t('savingCredential') : t('saveCredential')}</Button>
-            </div>
+          <Field label={t('apiKey')}>
+            <Input type="password" autoComplete="new-password" placeholder={snapshot.apiKeyConfigured ? t('apiKeyPlaceholderConfigured') : t('apiKeyPlaceholderNew')} value={apiKey} onChange={(event) => { setApiKey(event.target.value) }} />
           </Field>
+          <Field label={t('credential')} hint={credentialHint}><Input value={draft.credential} onChange={(event) => { update('credential', event.target.value) }} /></Field>
           <Field label={t('language')}><select value={draft.language} onChange={(event) => { update('language', event.target.value as 'zh' | 'en') }}><option value="zh">中文</option><option value="en">English</option></select></Field>
         </div>
       </section>
@@ -858,7 +822,7 @@ const CSS = `
 .dvt-tool-head{width:100%;min-height:38px;display:flex;align-items:center;gap:7px;padding:8px 10px;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;font:inherit}.dvt-tool-head:focus-visible{outline:2px solid #7c6ff0;outline-offset:-2px}.dvt-tool-icon{width:20px;height:20px;display:grid;place-items:center;border-radius:6px;color:#6659c7;background:rgba(111,94,219,.1);flex:none}.dvt-tool-title{font-size:12px;font-weight:650;white-space:nowrap}.dvt-tool-sep{opacity:.35}.dvt-tool-summary{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dsw-alias-fg-muted,#77736d)}.dvt-tool-status{margin-left:auto;font-size:11px;color:var(--dsw-alias-fg-muted,#77736d);max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dvt-tool[data-state=error] .dvt-tool-status{color:#c34f4f}.dvt-chevron{margin-left:auto;transition:transform .16s ease;opacity:.55}.dvt-chevron[data-open=true]{transform:rotate(180deg)}.dvt-tool-body{padding:0 10px 10px}.dvt-stack{display:grid;gap:10px}.dvt-muted{margin:0;color:var(--dsw-alias-fg-muted,#77736d);font-size:12px;line-height:1.5}
 .dvt-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.dvt-metrics>div,.dvt-diff-score{padding:10px;border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f7f5f1);display:grid;gap:4px}.dvt-metrics span,.dvt-diff-score span{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--dsw-alias-fg-muted,#77736d)}.dvt-metrics strong,.dvt-diff-score strong{font-size:13px}.dvt-list{list-style:none;margin:0;padding:0;display:grid;gap:4px;max-height:160px;overflow:auto}.dvt-list li{display:flex;justify-content:space-between;gap:12px;padding:6px 8px;border-radius:7px;background:var(--dsw-alias-bg-layer-2,#f7f5f1);font-size:11px}.dvt-list code{color:#6659c7}.dvt-table-wrap{max-height:220px;overflow:auto;border:1px solid var(--dsw-alias-border-subtle,#dedbd5);border-radius:9px}.dvt-table{width:100%;border-collapse:collapse;font-size:11px}.dvt-table th,.dvt-table td{padding:7px 8px;text-align:left;border-bottom:1px solid var(--dsw-alias-border-subtle,#e8e5df)}.dvt-table th{position:sticky;top:0;background:var(--dsw-alias-bg-layer-2,#f7f5f1);font-size:10px;text-transform:uppercase;letter-spacing:.05em}.dvt-table tr:last-child td{border-bottom:0}
 .dvt-artifact{border:1px solid var(--dsw-alias-border-subtle,#dedbd5);border-radius:10px;overflow:hidden;background:var(--dsw-alias-bg-layer-1,#fff)}.dvt-preview{display:block;width:100%;max-height:360px;object-fit:contain;background:repeating-conic-gradient(#eee 0 25%,#fafafa 0 50%) 50%/18px 18px;border:0}.dvt-svg{height:280px}.dvt-artifact-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 10px}.dvt-artifact-meta>div:first-child{min-width:0;display:grid;gap:2px}.dvt-artifact-meta strong{font-size:12px;overflow:hidden;text-overflow:ellipsis}.dvt-artifact-meta span,.dvt-artifact-meta small{font-size:10px;color:var(--dsw-alias-fg-muted,#77736d)}.dvt-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.dvt-download{display:inline-flex;align-items:center;height:28px;padding:0 12px;border-radius:999px;background:#6758d4;color:#fff;text-decoration:none;font-size:12px;font-weight:600}.dvt-artifact>.dvt-muted{padding:0 10px 10px}.dvt-diff-score>div{height:5px;border-radius:99px;background:rgba(120,110,100,.13);overflow:hidden}.dvt-diff-score i{display:block;height:100%;min-width:2px;background:linear-gradient(90deg,#edb34d,#df5d5d);border-radius:99px}.dvt-tool h4{font-size:11px;margin:0 0 6px}.dvt-palette{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:7px}.dvt-palette>div{display:flex;align-items:center;gap:8px;padding:7px;border:1px solid var(--dsw-alias-border-subtle,#dedbd5);border-radius:9px}.dvt-palette i{width:28px;height:28px;border-radius:7px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}.dvt-palette span{display:grid}.dvt-palette strong{font-size:11px}.dvt-palette small{font-size:10px;color:var(--dsw-alias-fg-muted,#77736d)}
-.dvt-settings{display:grid;gap:14px;max-width:900px;padding:8px 2px 32px;color:var(--dsw-alias-fg-primary,#26231f)}.dvt-settings-header{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;padding:8px 2px}.dvt-settings-header h2{font-size:25px;letter-spacing:-.025em;margin:3px 0 6px}.dvt-settings-header p{max-width:620px;margin:0;color:var(--dsw-alias-fg-muted,#77736d);font-size:13px;line-height:1.55}.dvt-kicker{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#6758d4;font-weight:700}.dvt-release{display:grid;gap:4px;min-width:170px;padding:9px 11px;border-radius:10px;background:var(--dsw-alias-bg-layer-2,#f7f5f1);font-size:10px;color:var(--dsw-alias-fg-muted,#77736d)}.dvt-release span{display:flex;justify-content:space-between;gap:12px}.dvt-release strong{color:var(--dsw-alias-fg-primary,#26231f)}.dvt-alert{padding:10px 12px;border-radius:10px;font-size:12px;line-height:1.5;display:grid;gap:3px}.dvt-alert.notice{background:rgba(92,108,213,.09);color:#5149a6}.dvt-alert.warning{background:rgba(224,162,55,.12);color:#986818}.dvt-alert.error{background:rgba(205,72,72,.1);color:#aa3939}.dvt-alert.success{background:rgba(48,154,100,.1);color:#267d52}.dvt-panel{display:grid;gap:12px;padding:15px;border:1px solid var(--dsw-alias-border-subtle,#dedbd5);border-radius:14px;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 1px 1px rgba(0,0,0,.02)}.dvt-panel-title{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.dvt-panel-title h3{font-size:14px;margin:0}.dvt-panel-title p{font-size:11px;line-height:1.45;color:var(--dsw-alias-fg-muted,#77736d);margin:4px 0 0;max-width:620px}.dvt-badge{font-size:10px;padding:3px 7px;border-radius:999px;font-weight:650}.dvt-badge.ok{background:rgba(48,154,100,.12);color:#267d52}.dvt-badge.error{background:rgba(205,72,72,.1);color:#aa3939}.dvt-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.dvt-credential-row{display:flex;gap:8px;align-items:center}.dvt-credential-row input{flex:1;min-width:0}.dvt-field{display:grid;gap:6px;align-content:start}.dvt-field>span{font-size:11px;font-weight:600}.dvt-field>small{font-size:10px;color:var(--dsw-alias-fg-muted,#77736d);line-height:1.4}.dvt-field select,.dvt-field textarea{width:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-subtle,#d9d5ce);border-radius:9px;background:var(--dsw-alias-bg-layer-1,#fff);color:inherit;font:inherit;font-size:12px;padding:8px 10px}.dvt-field select{height:36px}.dvt-field textarea{resize:vertical;min-height:76px}.dvt-field input[type=checkbox]{width:auto;justify-self:start;margin-top:2px;accent-color:#6758d4}.dvt-runtime-facts{display:grid;gap:4px;padding:9px 10px;border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f7f5f1);overflow:auto}.dvt-runtime-facts code{font-size:10px;white-space:nowrap;color:var(--dsw-alias-fg-muted,#77736d)}.dvt-save-row{display:flex;gap:8px;padding:2px 0}
+.dvt-settings{display:grid;gap:14px;max-width:900px;padding:8px 2px 32px;color:var(--dsw-alias-fg-primary,#26231f)}.dvt-settings-header{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;padding:8px 2px}.dvt-settings-header h2{font-size:25px;letter-spacing:-.025em;margin:3px 0 6px}.dvt-settings-header p{max-width:620px;margin:0;color:var(--dsw-alias-fg-muted,#77736d);font-size:13px;line-height:1.55}.dvt-kicker{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#6758d4;font-weight:700}.dvt-release{display:grid;gap:4px;min-width:170px;padding:9px 11px;border-radius:10px;background:var(--dsw-alias-bg-layer-2,#f7f5f1);font-size:10px;color:var(--dsw-alias-fg-muted,#77736d)}.dvt-release span{display:flex;justify-content:space-between;gap:12px}.dvt-release strong{color:var(--dsw-alias-fg-primary,#26231f)}.dvt-alert{padding:10px 12px;border-radius:10px;font-size:12px;line-height:1.5;display:grid;gap:3px}.dvt-alert.notice{background:rgba(92,108,213,.09);color:#5149a6}.dvt-alert.warning{background:rgba(224,162,55,.12);color:#986818}.dvt-alert.error{background:rgba(205,72,72,.1);color:#aa3939}.dvt-alert.success{background:rgba(48,154,100,.1);color:#267d52}.dvt-panel{display:grid;gap:12px;padding:15px;border:1px solid var(--dsw-alias-border-subtle,#dedbd5);border-radius:14px;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 1px 1px rgba(0,0,0,.02)}.dvt-panel-title{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.dvt-panel-title h3{font-size:14px;margin:0}.dvt-panel-title p{font-size:11px;line-height:1.45;color:var(--dsw-alias-fg-muted,#77736d);margin:4px 0 0;max-width:620px}.dvt-badge{font-size:10px;padding:3px 7px;border-radius:999px;font-weight:650}.dvt-badge.ok{background:rgba(48,154,100,.12);color:#267d52}.dvt-badge.error{background:rgba(205,72,72,.1);color:#aa3939}.dvt-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.dvt-field{display:grid;gap:6px;align-content:start}.dvt-field>span{font-size:11px;font-weight:600}.dvt-field>small{font-size:10px;color:var(--dsw-alias-fg-muted,#77736d);line-height:1.4}.dvt-field select,.dvt-field textarea{width:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-subtle,#d9d5ce);border-radius:9px;background:var(--dsw-alias-bg-layer-1,#fff);color:inherit;font:inherit;font-size:12px;padding:8px 10px}.dvt-field select{height:36px}.dvt-field textarea{resize:vertical;min-height:76px}.dvt-field input[type=checkbox]{width:auto;justify-self:start;margin-top:2px;accent-color:#6758d4}.dvt-runtime-facts{display:grid;gap:4px;padding:9px 10px;border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f7f5f1);overflow:auto}.dvt-runtime-facts code{font-size:10px;white-space:nowrap;color:var(--dsw-alias-fg-muted,#77736d)}.dvt-save-row{display:flex;gap:8px;padding:2px 0}
 .dvt-health-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}.dvt-health-grid>div{padding:9px 10px;border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f7f5f1);border-left:3px solid #aaa}.dvt-health-grid>div[data-status=ok]{border-left-color:#39a66b}.dvt-health-grid>div[data-status=warning],.dvt-health-grid>div[data-status=not_tested]{border-left-color:#d49a37}.dvt-health-grid>div[data-status=error]{border-left-color:#cf5050}.dvt-health-grid span{font-size:10px;text-transform:capitalize}.dvt-health-grid strong{float:right;font-size:9px;text-transform:uppercase;color:var(--dsw-alias-fg-muted,#77736d)}.dvt-health-grid p{clear:both;margin:5px 0 0;font-size:10px;line-height:1.4;color:var(--dsw-alias-fg-muted,#77736d)}.dvt-loading{padding:24px;border-radius:12px;background:var(--dsw-alias-bg-layer-2,#f7f5f1);font-size:12px;color:var(--dsw-alias-fg-muted,#77736d)}
 @media(max-width:720px){.dvt-settings-header{display:grid}.dvt-release{width:auto}.dvt-form-grid{grid-template-columns:1fr}.dvt-metrics{grid-template-columns:1fr}.dvt-artifact-meta{align-items:flex-start;flex-direction:column}.dvt-panel-title{flex-direction:column}}
 `

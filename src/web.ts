@@ -38,6 +38,7 @@ export interface VisionToolkitSettingsSnapshot {
   schemaVersion: 1
   writable: boolean
   settings: {
+    /** Stored configuration with `provider.apiKey` removed. */
     value: VisionToolkitConfig
     user?: unknown
     base?: unknown
@@ -50,6 +51,8 @@ export interface VisionToolkitSettingsSnapshot {
     source?: string
     writable: boolean
   }
+  /** Whether a direct `provider.apiKey` is stored (never the value itself). */
+  apiKeyConfigured: boolean
   runtime: RuntimeManagerStatus
   release: {
     pluginVersion: string
@@ -204,6 +207,26 @@ function publicMessage(error: unknown): string {
   return String(error)
 }
 
+/**
+ * Strip `provider.apiKey` (and its stored value) from any snapshot payload.
+ * Applied to the resolved value and the detached user/base layers: the key
+ * must never reach the browser, only its configured-ness.
+ */
+function redactProviderApiKey(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  const provider = value.provider
+  if (!isRecord(provider) || typeof provider.apiKey !== 'string') return value
+  const redactedProvider = { ...provider }
+  delete redactedProvider.apiKey
+  return { ...value, provider: redactedProvider }
+}
+
+/** The runtime status carries the active resolved config — redact its key too. */
+function redactRuntimeStatus(status: RuntimeManagerStatus): RuntimeManagerStatus {
+  if (status.activeConfig === undefined) return status
+  return { ...status, activeConfig: redactProviderApiKey(status.activeConfig) as ResolvedVisionToolkitConfig }
+}
+
 /** Same-origin Settings and health handler. */
 export class VisionToolkitWebBackend {
   constructor(
@@ -223,13 +246,15 @@ export class VisionToolkitWebBackend {
     const value = descriptor.value as VisionToolkitConfig
     const resolved = resolveConfig(value)
     const credential = await this.credential(resolved)
+    const directApiKey = value.provider?.apiKey
+    const apiKeyConfigured = typeof directApiKey === 'string' && directApiKey.trim().length > 0
     return {
       schemaVersion: 1,
       writable: this.ctx.settings.writable,
       settings: {
-        value,
-        ...(descriptor.user === undefined ? {} : { user: descriptor.user }),
-        ...(descriptor.base === undefined ? {} : { base: descriptor.base }),
+        value: redactProviderApiKey(value) as VisionToolkitConfig,
+        ...(descriptor.user === undefined ? {} : { user: redactProviderApiKey(descriptor.user) }),
+        ...(descriptor.base === undefined ? {} : { base: redactProviderApiKey(descriptor.base) }),
         revision: descriptor.revision,
         applies: 'live',
       },
@@ -239,7 +264,8 @@ export class VisionToolkitWebBackend {
         ...(credential.source === undefined ? {} : { source: credential.source }),
         writable: credential.writable,
       },
-      runtime: this.manager.status(),
+      apiKeyConfigured,
+      runtime: redactRuntimeStatus(this.manager.status()),
       release: {
         pluginVersion: PLUGIN_VERSION,
         upstreamRepository: UPSTREAM_REPOSITORY,
@@ -250,18 +276,36 @@ export class VisionToolkitWebBackend {
     }
   }
 
+  /**
+   * Carry `provider.apiKey` through a save: a trimmed non-empty value is
+   * stored; an absent or empty one leaves the currently stored key in place
+   * (the UI never sees the stored value, so an empty input must not erase
+   * it). The key itself is never echoed back in responses or errors.
+   */
+  private carryApiKey(incoming: VisionToolkitConfig): VisionToolkitConfig {
+    const incomingKey = incoming.provider?.apiKey?.trim()
+    if (incomingKey !== undefined && incomingKey.length > 0) {
+      return { ...incoming, provider: { ...incoming.provider, apiKey: incomingKey } }
+    }
+    const existing = descriptorOf(this.ctx).value as VisionToolkitConfig | undefined
+    const existingKey = existing?.provider?.apiKey
+    if (existingKey === undefined) return incoming
+    return { ...incoming, provider: { ...(incoming.provider ?? {}), apiKey: existingKey } }
+  }
+
   private async save(request: SaveRequest): Promise<VisionToolkitSettingsSnapshot> {
     if (!this.ctx.settings.writable) throw new Error('settings provider is read-only')
+    const value = this.carryApiKey(request.value)
     let candidate: PreparedRuntimeGeneration
     try {
-      candidate = await this.manager.prepareCandidate(request.value)
+      candidate = await this.manager.prepareCandidate(value)
     } catch (error) {
       this.manager.recordFailure(error)
       throw error
     }
     await this.ctx.settings.replace(
       VISION_TOOLKIT_SETTINGS_NAMESPACE,
-      request.value as object,
+      value as object,
       request.expectedRevision,
     )
     this.manager.activateCandidate(candidate)
@@ -330,6 +374,7 @@ export class VisionToolkitWebBackend {
       } else {
         await this.ctx.credentials.set(ref, request.value)
       }
+      credentialWriteJson(res, 200, { ok: true })
     } catch {
       // Never surface the provider error or the value in logs or responses.
       this.ctx.logger.warn('dsh-vision-toolkit credential write failed for ref "%s"', String(ref))
@@ -339,7 +384,6 @@ export class VisionToolkitWebBackend {
       })
       return
     }
-    credentialWriteJson(res, 200, { ok: true })
   }
 
   /** Handle the exact Settings route. */

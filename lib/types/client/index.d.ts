@@ -11,13 +11,10 @@ declare const en: {
     readonly provider: "Vision service";
     readonly baseUrl: "Base URL";
     readonly credential: "Credential reference";
-    readonly credentialHint: "Enter the reference name here (e.g. VISION_API_KEY); store the API key itself in the credential vault via the input below.";
-    readonly credentialKey: "API Key";
-    readonly saveCredential: "Save to vault";
-    readonly savingCredential: "Saving…";
-    readonly credentialSaved: "Credential saved to the vault.";
-    readonly credentialRefRequired: "Enter the reference name first.";
-    readonly credentialSaveFailed: "The credential could not be saved.";
+    readonly credentialHint: "Advanced: used only when no API Key is set above (default VISION_API_KEY).";
+    readonly apiKey: "API Key";
+    readonly apiKeyPlaceholderConfigured: "Configured — enter a new value to override";
+    readonly apiKeyPlaceholderNew: "Paste API Key";
     readonly model: "Model";
     readonly language: "Output language";
     readonly autoBridge: "Auto image bridge";
@@ -109,6 +106,7 @@ interface SettingsValue {
     provider?: {
         baseUrl?: string;
         credential?: string;
+        apiKey?: string;
         model?: string;
     };
     language?: 'zh' | 'en';
@@ -141,6 +139,8 @@ interface SettingsSnapshot {
         source?: string;
         writable: boolean;
     };
+    /** Whether a direct provider.apiKey is stored; the value is never returned. */
+    apiKeyConfigured: boolean;
     runtime: {
         ready: boolean;
         generation: number;

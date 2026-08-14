@@ -755,21 +755,29 @@ export class VisionToolkitRuntime {
     }
   }
 
-  /** Resolve the configured credential at the remote-operation boundary. */
+  /** Resolve the configured key at the remote-operation boundary. */
   async resolveVisionEnv(): Promise<UpstreamEnvironment> {
-    const resolved: ResolvedCredential | undefined = await this.ctx.credentials.resolve(this.config.provider.credential)
-    if (resolved === undefined) {
-      throw new VisionToolkitError(
-        'config',
-        'the configured credential is not set; store it through DSH credentials',
-      )
-    }
+    // A directly configured provider.apiKey wins and never touches the
+    // credentials service; otherwise fall back to the DSH credential
+    // reference. The two paths are alternatives, never concatenated.
+    const key = this.config.provider.apiKey ?? await this.resolveCredentialValue()
     return {
-      VISION_API_KEY: resolved.value,
+      VISION_API_KEY: key,
       VISION_BASE_URL: this.config.provider.baseUrl,
       VISION_MODEL: this.config.provider.model,
       LANG: this.config.language,
     }
+  }
+
+  private async resolveCredentialValue(): Promise<string> {
+    const resolved: ResolvedCredential | undefined = await this.ctx.credentials.resolve(this.config.provider.credential)
+    if (resolved === undefined) {
+      throw new VisionToolkitError(
+        'config',
+        'the configured credential is not set; set provider.apiKey directly or store it through DSH credentials',
+      )
+    }
+    return resolved.value
   }
 
   private pathPolicy(workspace: string): Promise<PathPolicy> {
@@ -1706,15 +1714,21 @@ export class VisionToolkitRuntime {
         if (operation.signal.aborted) throw new VisionToolkitError('cancelled', 'vision_toolkit_health: cancelled')
         chrome = { status: 'error', detail: 'Chrome availability probe failed' }
       }
+      const directApiKey = this.config.provider.apiKey
       let resolvedCredential: ResolvedCredential | undefined
       let credential: HealthCheck
-      try {
-        resolvedCredential = await this.ctx.credentials.resolve(this.config.provider.credential)
-        credential = resolvedCredential === undefined
-          ? { status: 'error', detail: 'the configured credential is not set' }
-          : { status: 'ok', detail: 'the configured credential is resolvable' }
-      } catch {
-        credential = { status: 'error', detail: 'the configured credential could not be resolved' }
+      if (directApiKey !== undefined) {
+        // Directly configured keys bypass the credentials service entirely.
+        credential = { status: 'ok', detail: 'provider.apiKey is set directly' }
+      } else {
+        try {
+          resolvedCredential = await this.ctx.credentials.resolve(this.config.provider.credential)
+          credential = resolvedCredential === undefined
+            ? { status: 'error', detail: 'the configured credential is not set' }
+            : { status: 'ok', detail: 'the configured credential is resolvable' }
+        } catch {
+          credential = { status: 'error', detail: 'the configured credential could not be resolved' }
+        }
       }
       let artifactDirectory: HealthCheck
       try {
@@ -1729,7 +1743,8 @@ export class VisionToolkitRuntime {
         detail: 'Connection was not tested; pass testConnection=true to query the configured /models endpoint',
       }
       if (testConnection) {
-        if (resolvedCredential === undefined) {
+        const connectionKey = directApiKey ?? resolvedCredential?.value
+        if (connectionKey === undefined) {
           service = { status: 'error', detail: 'Connection test skipped because the configured credential is unavailable' }
         } else {
           operation.metrics.usedVisionService = true
@@ -1738,7 +1753,7 @@ export class VisionToolkitRuntime {
             const started = Date.now()
             const response = await fetch(endpoint, {
               method: 'GET',
-              headers: { Authorization: `Bearer ${resolvedCredential.value}`, Accept: 'application/json' },
+              headers: { Authorization: `Bearer ${connectionKey}`, Accept: 'application/json' },
               signal: operation.signal,
             })
             operation.metrics.upstreamMs += Date.now() - started

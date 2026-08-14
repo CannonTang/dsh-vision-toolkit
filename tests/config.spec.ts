@@ -40,6 +40,35 @@ describe('resolveConfig', () => {
       .toThrowError(/credential/)
   })
 
+  it('keeps a directly filled provider.apiKey (trimmed) alongside the reference', () => {
+    const config = resolveConfig({ provider: { apiKey: '  sk-direct-123  ', credential: 'MY_VISION_KEY' } })
+    expect(config.provider.apiKey).toBe('sk-direct-123')
+    // The reference is kept in the schema; runtime resolution picks apiKey.
+    expect(config.provider.credential).toBe('MY_VISION_KEY')
+  })
+
+  it('drops a whitespace-only provider.apiKey', () => {
+    const config = resolveConfig({ provider: { apiKey: '   ' } })
+    expect(config.provider.apiKey).toBeUndefined()
+  })
+
+  it('never echoes the apiKey value in config errors', () => {
+    const leaked = 'sk-direct-secret-value'
+    let thrown: unknown
+    try {
+      resolveConfig({ provider: { apiKey: leaked }, language: 'fr' as 'zh' })
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(Error)
+    // Walk the whole cause chain: no error may carry the key back to the user.
+    let cursor: unknown = thrown
+    while (cursor instanceof Error) {
+      expect(cursor.message).not.toContain(leaked)
+      cursor = cursor.cause
+    }
+  })
+
   it('redacts a leaked key from invalid credential reference errors', () => {
     const leaked = 'sk-leaked-value'
     let thrown: unknown

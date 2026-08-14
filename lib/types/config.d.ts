@@ -1,8 +1,9 @@
 /**
- * Plugin configuration: provider endpoint and credential reference, output
- * language, limits, and the external upstream runtime location. Secrets never
- * live here — `provider.credential` is a DSH Credential reference resolved per
- * operation through `ctx.credentials`.
+ * Plugin configuration: provider endpoint, API key or credential reference,
+ * output language, limits, and the external upstream runtime location. The API
+ * key may be set directly (`provider.apiKey`) or referenced through DSH
+ * credentials (`provider.credential`, resolved per operation through
+ * `ctx.credentials`); the direct value wins when both are present.
  * @module dsh-vision-toolkit/config
  */
 import type Schema from 'schemastery';
@@ -16,6 +17,12 @@ export interface VisionToolkitConfig {
         baseUrl?: string;
         /** DSH Credential reference holding the API key (an environment-style name). */
         credential?: string;
+        /**
+         * API key used directly, bypassing the DSH Credential service. Takes
+         * precedence over `credential` at resolution time; the value never appears
+         * in errors, logs, or Web snapshots.
+         */
+        apiKey?: string;
         /** Multimodal model name. */
         model?: string;
     };
@@ -54,6 +61,8 @@ export interface ResolvedVisionToolkitConfig {
     provider: {
         baseUrl: string;
         credential: CredentialRef;
+        /** Direct API key (trimmed, non-empty); takes precedence over `credential`. */
+        apiKey?: string;
         model: string;
     };
     language: 'zh' | 'en';

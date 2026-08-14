@@ -347,8 +347,9 @@ export declare class VisionToolkitRuntime {
     private operationError;
     private semaphore;
     private runOperation;
-    /** Resolve the configured credential at the remote-operation boundary. */
+    /** Resolve the configured key at the remote-operation boundary. */
     resolveVisionEnv(): Promise<UpstreamEnvironment>;
+    private resolveCredentialValue;
     private pathPolicy;
     private validateImage;
     private accountImage;

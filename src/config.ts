@@ -1,8 +1,9 @@
 /**
- * Plugin configuration: provider endpoint and credential reference, output
- * language, limits, and the external upstream runtime location. Secrets never
- * live here — `provider.credential` is a DSH Credential reference resolved per
- * operation through `ctx.credentials`.
+ * Plugin configuration: provider endpoint, API key or credential reference,
+ * output language, limits, and the external upstream runtime location. The API
+ * key may be set directly (`provider.apiKey`) or referenced through DSH
+ * credentials (`provider.credential`, resolved per operation through
+ * `ctx.credentials`); the direct value wins when both are present.
  * @module dsh-vision-toolkit/config
  */
 
@@ -22,6 +23,12 @@ export interface VisionToolkitConfig {
     baseUrl?: string
     /** DSH Credential reference holding the API key (an environment-style name). */
     credential?: string
+    /**
+     * API key used directly, bypassing the DSH Credential service. Takes
+     * precedence over `credential` at resolution time; the value never appears
+     * in errors, logs, or Web snapshots.
+     */
+    apiKey?: string
     /** Multimodal model name. */
     model?: string
   }
@@ -59,6 +66,8 @@ export const Config: Schema<VisionToolkitConfig> = z.object({
   provider: z.object({
     baseUrl: z.string().default('https://api.inferera.com/v1'),
     credential: z.string().default('VISION_API_KEY'),
+    // Optional: the key itself, used directly when non-empty.
+    apiKey: z.string(),
     model: z.string().default('gemini-3.6-flash'),
   }),
   language: z.union(['zh', 'en'] as const).default('zh'),
@@ -83,6 +92,8 @@ export interface ResolvedVisionToolkitConfig {
   provider: {
     baseUrl: string
     credential: CredentialRef
+    /** Direct API key (trimmed, non-empty); takes precedence over `credential`. */
+    apiKey?: string
     model: string
   }
   language: 'zh' | 'en'
@@ -131,9 +142,14 @@ export function resolveConfig(config: VisionToolkitConfig = {}): ResolvedVisionT
     // would leak a pasted API key into the conversation and logs.
     throw new VisionToolkitError(
       'config',
-      'provider.credential is not a valid credential reference. Keep the reference name here (e.g. VISION_API_KEY) and store the API key itself via the credential input below.',
+      'provider.credential is not a valid credential reference. Keep the reference name here (e.g. VISION_API_KEY) and set the API key itself directly in provider.apiKey or via DSH credentials.',
     )
   }
+  // A directly filled key wins over the reference at runtime; only a trimmed
+  // non-empty value is kept (whitespace-only input is dropped). The key is
+  // never validated further and never echoed by any error raised here.
+  const rawApiKey = provider.apiKey?.trim()
+  const apiKey = rawApiKey !== undefined && rawApiKey.length > 0 ? rawApiKey : undefined
   const model = (provider.model ?? 'gemini-3.6-flash').trim()
   if (model.length === 0) {
     throw new VisionToolkitError('config', 'provider.model must not be empty')
@@ -187,7 +203,7 @@ export function resolveConfig(config: VisionToolkitConfig = {}): ResolvedVisionT
   }
   const allowedDirs = (config.allowedDirs ?? []).map(dir => dir.trim()).filter(dir => dir.length > 0)
   return {
-    provider: { baseUrl, credential, model },
+    provider: { baseUrl, credential, ...(apiKey === undefined ? {} : { apiKey }), model },
     language,
     autoBridge: { enabled: autoBridgeEnabled, maxImagesPerMessage },
     timeoutMs,

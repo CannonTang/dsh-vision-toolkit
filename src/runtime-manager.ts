@@ -17,7 +17,10 @@ export interface PreparedRuntimeGeneration {
   runtime: VisionToolkitRuntime
 }
 
-/** Public, secret-free status used by the Settings page. */
+/**
+ * Public status used by the Settings page. `activeConfig` may carry a
+ * `provider.apiKey`; the Web layer redacts it before any snapshot is served.
+ */
 export interface RuntimeManagerStatus {
   ready: boolean
   generation: number

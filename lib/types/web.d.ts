@@ -18,6 +18,7 @@ export interface VisionToolkitSettingsSnapshot {
     schemaVersion: 1;
     writable: boolean;
     settings: {
+        /** Stored configuration with `provider.apiKey` removed. */
         value: VisionToolkitConfig;
         user?: unknown;
         base?: unknown;
@@ -30,6 +31,8 @@ export interface VisionToolkitSettingsSnapshot {
         source?: string;
         writable: boolean;
     };
+    /** Whether a direct `provider.apiKey` is stored (never the value itself). */
+    apiKeyConfigured: boolean;
     runtime: RuntimeManagerStatus;
     release: {
         pluginVersion: string;
@@ -60,6 +63,13 @@ export declare class VisionToolkitWebBackend {
     private credential;
     /** Build the current settings/runtime/credential snapshot without secrets. */
     snapshot(): Promise<VisionToolkitSettingsSnapshot>;
+    /**
+     * Carry `provider.apiKey` through a save: a trimmed non-empty value is
+     * stored; an absent or empty one leaves the currently stored key in place
+     * (the UI never sees the stored value, so an empty input must not erase
+     * it). The key itself is never echoed back in responses or errors.
+     */
+    private carryApiKey;
     private save;
     private health;
     /**

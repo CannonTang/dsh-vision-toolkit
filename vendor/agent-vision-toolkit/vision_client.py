@@ -145,6 +145,12 @@ def describe_image(image_url: str | list[str], prompt: str | None = None, max_to
             return text
         except urllib.error.HTTPError as exc:
             body = exc.read().decode(errors="replace")[:400].replace(api_key, "<redacted>")
+            # Providers such as Aihubmix/micuapi echo only a key prefix in 401
+            # bodies ("invalid key: jUyFNw ..."), so the full-key replace above
+            # misses it. Redact the first six characters too; shorter keys are
+            # skipped to avoid over-matching common substrings in the body.
+            if len(api_key) >= 6:
+                body = body.replace(api_key[:6], "<redacted>")
             body = body.replace("\r", " ").replace("\n", " ")
             if exc.code in {429, 500, 502, 503, 504} and attempt < retries:
                 print(f"vision: HTTP {exc.code}, retrying ({attempt + 1}/{retries})", file=sys.stderr)

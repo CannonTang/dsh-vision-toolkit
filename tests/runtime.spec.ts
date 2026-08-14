@@ -118,6 +118,41 @@ describe('VisionToolkitRuntime', () => {
     expect(region.answer).toBe('Fixture answer to the question')
   })
 
+  it('uses a directly configured provider.apiKey without touching the credentials service', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    const resolve = vi.fn(async () => { throw new Error('credentials service must not be used') })
+    ctx.provide('credentials', { resolve } as unknown as Credentials)
+    const config = resolveConfig({
+      provider: {
+        baseUrl: 'https://vision.example/v1',
+        credential: 'VISION_API_KEY',
+        model: 'fixture-model',
+        apiKey: 'direct-key-value',
+      },
+      runtime: { mode: 'external', agentVisionToolkitPath: FIXTURE_UPSTREAM, python: 'python3' },
+    })
+    const runtime = new VisionToolkitRuntime(ctx, config, {} as UpstreamAdapter)
+    const env = await runtime.resolveVisionEnv()
+    expect(env.VISION_API_KEY).toBe('direct-key-value')
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the credentials service when provider.apiKey is unset', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    const resolve = vi.fn(async () => ({ value: 'vault-key-value', source: 'env' }))
+    ctx.provide('credentials', { resolve } as unknown as Credentials)
+    const config = resolveConfig({
+      provider: { baseUrl: 'https://vision.example/v1', credential: 'VISION_API_KEY', model: 'fixture-model' },
+      runtime: { mode: 'external', agentVisionToolkitPath: FIXTURE_UPSTREAM, python: 'python3' },
+    })
+    const runtime = new VisionToolkitRuntime(ctx, config, {} as UpstreamAdapter)
+    const env = await runtime.resolveVisionEnv()
+    expect(env.VISION_API_KEY).toBe('vault-key-value')
+    expect(resolve).toHaveBeenCalledTimes(1)
+  })
+
   it('deduplicates the same resolved image inside one glance request', async () => {
     const { runtime } = await setup()
     const workspace = await tempWorkspace()
