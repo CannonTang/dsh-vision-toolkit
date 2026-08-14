@@ -761,7 +761,7 @@ export class VisionToolkitRuntime {
     if (resolved === undefined) {
       throw new VisionToolkitError(
         'config',
-        `credential ${this.config.provider.credential} is not configured; set it through DSH credentials`,
+        'the configured credential is not set; store it through DSH credentials',
       )
     }
     return {
@@ -1711,10 +1711,10 @@ export class VisionToolkitRuntime {
       try {
         resolvedCredential = await this.ctx.credentials.resolve(this.config.provider.credential)
         credential = resolvedCredential === undefined
-          ? { status: 'error', detail: `credential ${this.config.provider.credential} is not configured` }
-          : { status: 'ok', detail: `credential ${this.config.provider.credential} is resolvable` }
+          ? { status: 'error', detail: 'the configured credential is not set' }
+          : { status: 'ok', detail: 'the configured credential is resolvable' }
       } catch {
-        credential = { status: 'error', detail: `credential ${this.config.provider.credential} could not be resolved` }
+        credential = { status: 'error', detail: 'the configured credential could not be resolved' }
       }
       let artifactDirectory: HealthCheck
       try {

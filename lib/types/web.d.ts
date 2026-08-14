@@ -11,6 +11,8 @@ import { type VisionToolkitConfig } from './config.ts';
 import { VisionToolkitRuntimeManager, type PreparedRuntimeGeneration, type RuntimeManagerStatus } from './runtime-manager.ts';
 /** Exact route used by the browser Settings page. */
 export declare const SETTINGS_ROUTE = "/_dsh/vision-toolkit/settings";
+/** Same-origin credential write route: store or remove one reference's value. */
+export declare const CREDENTIAL_ROUTE = "/_dsh/vision-toolkit/credential";
 /** Public Settings snapshot; credential values are deliberately impossible here. */
 export interface VisionToolkitSettingsSnapshot {
     schemaVersion: 1;
@@ -60,6 +62,12 @@ export declare class VisionToolkitWebBackend {
     snapshot(): Promise<VisionToolkitSettingsSnapshot>;
     private save;
     private health;
+    /**
+     * Store (`value` non-empty) or remove (empty) one credential value. The
+     * submitted value never leaves the credential store into logs, errors, or
+     * responses: every failure returns a fixed redacted message.
+     */
+    handleCredential(req: IncomingMessage, res: ServerResponse): Promise<void>;
     /** Handle the exact Settings route. */
     handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
 }

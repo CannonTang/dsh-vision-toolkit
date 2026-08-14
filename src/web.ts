@@ -8,7 +8,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from 'cordis'
 import type { CredentialInfo } from '@deepseek-ai/dsh-credentials'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { SettingsConflictError, type SettingsDescriptor } from '@deepseek-ai/dsh-settings'
 // Type-only import activates the optional webServer Context declaration.
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -29,6 +29,9 @@ import { PLUGIN_VERSION, UPSTREAM_COMMIT, UPSTREAM_REPOSITORY, UPSTREAM_VERSION 
 
 /** Exact route used by the browser Settings page. */
 export const SETTINGS_ROUTE = '/_dsh/vision-toolkit/settings'
+
+/** Same-origin credential write route: store or remove one reference's value. */
+export const CREDENTIAL_ROUTE = '/_dsh/vision-toolkit/credential'
 
 /** Public Settings snapshot; credential values are deliberately impossible here. */
 export interface VisionToolkitSettingsSnapshot {
@@ -55,6 +58,11 @@ export interface VisionToolkitSettingsSnapshot {
     upstreamCommit: string
   }
   artifactRouteAvailable: boolean
+}
+
+interface CredentialWriteRequest {
+  ref: string
+  value: string
 }
 
 interface SaveRequest {
@@ -105,7 +113,7 @@ function descriptorOf(ctx: Context): SettingsDescriptor {
   return descriptor
 }
 
-function responseJson<T>(res: ServerResponse, status: number, body: JsonResponse<T>): void {
+function writeJson(res: ServerResponse, status: number, body: unknown): void {
   const bytes = Buffer.from(JSON.stringify(body))
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   res.setHeader('Content-Length', String(bytes.length))
@@ -114,6 +122,17 @@ function responseJson<T>(res: ServerResponse, status: number, body: JsonResponse
   res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'")
   res.writeHead(status)
   res.end(bytes)
+}
+
+function responseJson<T>(res: ServerResponse, status: number, body: JsonResponse<T>): void {
+  writeJson(res, status, body)
+}
+
+/** Credential write responses never carry the submitted value. */
+type CredentialWriteResponse = { ok: true } | { ok: false; error: string }
+
+function credentialWriteJson(res: ServerResponse, status: number, body: CredentialWriteResponse): void {
+  writeJson(res, status, body)
 }
 
 function requestError(res: ServerResponse, status: number, code: string, message: string): void {
@@ -148,6 +167,16 @@ async function readJson(req: IncomingMessage, maxBytes = 64 * 1024): Promise<unk
   }
   if (chunks.length === 0) throw new TypeError('request body is empty')
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+}
+
+function parseCredentialWrite(value: unknown): CredentialWriteRequest {
+  if (!isRecord(value) || typeof value.ref !== 'string' || value.ref.trim().length === 0) {
+    throw new TypeError('request ref is required')
+  }
+  if (value.value !== undefined && typeof value.value !== 'string') {
+    throw new TypeError('request value must be a string')
+  }
+  return { ref: value.ref, value: typeof value.value === 'string' ? value.value : '' }
 }
 
 function parseRequest(value: unknown): SettingsRequest {
@@ -258,6 +287,61 @@ export class VisionToolkitWebBackend {
     }
   }
 
+  /**
+   * Store (`value` non-empty) or remove (empty) one credential value. The
+   * submitted value never leaves the credential store into logs, errors, or
+   * responses: every failure returns a fixed redacted message.
+   */
+  async handleCredential(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (req.method !== 'POST') {
+      res.setHeader('Allow', 'POST')
+      credentialWriteJson(res, 405, { ok: false, error: 'Use POST' })
+      return
+    }
+    if (!sameOriginPost(req)) {
+      credentialWriteJson(res, 403, { ok: false, error: 'The request must originate from this DSH Web application' })
+      return
+    }
+    let request: CredentialWriteRequest
+    try {
+      request = parseCredentialWrite(await readJson(req))
+    } catch (error) {
+      credentialWriteJson(
+        res,
+        error instanceof RangeError ? 413 : 400,
+        { ok: false, error: 'request body must be a JSON object with a credential reference and an optional value' },
+      )
+      return
+    }
+    let ref: CredentialRef
+    try {
+      ref = credentialRef(request.ref.trim())
+    } catch {
+      // The submitted ref may itself be a pasted secret; never echo it.
+      credentialWriteJson(res, 400, {
+        ok: false,
+        error: 'the credential reference is invalid; use an environment-style name such as VISION_API_KEY',
+      })
+      return
+    }
+    try {
+      if (request.value.length === 0) {
+        await this.ctx.credentials.unset(ref)
+      } else {
+        await this.ctx.credentials.set(ref, request.value)
+      }
+    } catch {
+      // Never surface the provider error or the value in logs or responses.
+      this.ctx.logger.warn('dsh-vision-toolkit credential write failed for ref "%s"', String(ref))
+      credentialWriteJson(res, 400, {
+        ok: false,
+        error: 'the credential could not be saved; the credential store may be read-only or unavailable',
+      })
+      return
+    }
+    credentialWriteJson(res, 200, { ok: true })
+  }
+
   /** Handle the exact Settings route. */
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (req.method === 'GET') {
@@ -325,7 +409,13 @@ export function installVisionToolkitWeb(
         path: SETTINGS_ROUTE,
         handler: (req, res) => backend.handle(req, res),
       })
+      const disposeCredential = webCtx.webServer.register({
+        kind: 'exact',
+        path: CREDENTIAL_ROUTE,
+        handler: (req, res) => backend.handleCredential(req, res),
+      })
       return () => {
+        disposeCredential()
         disposeSettings()
         disposeArtifact()
         detach()

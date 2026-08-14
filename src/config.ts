@@ -125,11 +125,13 @@ export function resolveConfig(config: VisionToolkitConfig = {}): ResolvedVisionT
   let credential: CredentialRef
   try {
     credential = credentialRef((provider.credential ?? 'VISION_API_KEY').trim())
-  } catch (error) {
+  } catch {
+    // Never echo the submitted value and never attach the host error as cause:
+    // `credentialRef` TypeError messages include the input, so the cause chain
+    // would leak a pasted API key into the conversation and logs.
     throw new VisionToolkitError(
       'config',
-      `provider.credential "${provider.credential ?? 'VISION_API_KEY'}" is not a valid credential reference`,
-      { cause: error },
+      'provider.credential is not a valid credential reference. Keep the reference name here (e.g. VISION_API_KEY) and store the API key itself via the credential input below.',
     )
   }
   const model = (provider.model ?? 'gemini-3.6-flash').trim()

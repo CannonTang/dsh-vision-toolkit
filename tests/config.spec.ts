@@ -40,6 +40,28 @@ describe('resolveConfig', () => {
       .toThrowError(/credential/)
   })
 
+  it('redacts a leaked key from invalid credential reference errors', () => {
+    const leaked = 'sk-leaked-value'
+    let thrown: unknown
+    try {
+      resolveConfig({ provider: { credential: leaked } })
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(Error)
+    // Neither the message nor any cause in the chain may echo the submitted
+    // value: the host `credentialRef` TypeError does echo it, so the original
+    // error must never be attached as cause.
+    let cursor: unknown = thrown
+    while (cursor instanceof Error) {
+      expect(cursor.message).not.toContain(leaked)
+      cursor = cursor.cause
+    }
+    const message = thrown instanceof Error ? thrown.message : String(thrown)
+    expect(message).toMatch(/credential/)
+    expect(message).toContain('VISION_API_KEY')
+  })
+
   it('rejects an empty model', () => {
     expect(() => resolveConfig({ provider: { model: '  ' } }))
       .toThrowError(/provider\.model/)
